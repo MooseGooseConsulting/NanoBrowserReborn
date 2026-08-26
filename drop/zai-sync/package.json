@@ -1,0 +1,16 @@
+{
+  "name": "zai-sync",
+  "version": "0.2.0",
+  "description": "Lossless incremental capture of chat.z.ai (Open WebUI fork) conversation corpus. Multi-provider generalization pending.",
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "test": "node test/test.mjs",
+    "test:live": "node test/live-check.mjs",
+    "sync": "node node/sync.mjs",
+    "sync:smoke": "node node/sync.mjs --limit 3",
+    "sync:full": "node node/sync.mjs --md --files"
+  },
+  "files": ["core.js", "render.js", "files.js", "node/", "userscript/", "test/", "*.md"]
+}

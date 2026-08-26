@@ -1,0 +1,12 @@
+{
+  "mode": "Playwright evaluate + four-function GM shim",
+  "script_executes": true,
+  "unsafe_window": true,
+  "gm_storage_get_set_delete": true,
+  "state_survives_reinjection": true,
+  "download_triggered": true,
+  "download_name": "local-userscript-fixture.md",
+  "download_preview": "---\ntitle: Local userscript fixture\n---\n\n#### You:\nDoes the userscript runner work?\n\n#### Assistant:\nYes. This is the local compatibility fixture.\n",
+  "sandbox_navigation_note": "Chromium navigation is blocked by administrator; fixture used page.set_content on about:blank"
+}
+DIRECT_HARNESS=PASS

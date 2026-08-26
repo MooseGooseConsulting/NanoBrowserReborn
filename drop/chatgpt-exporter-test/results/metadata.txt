@@ -1,0 +1,67 @@
+{
+  "name": [
+    "ChatGPT Exporter"
+  ],
+  "name:zh-CN": [
+    "ChatGPT Exporter"
+  ],
+  "name:zh-TW": [
+    "ChatGPT Exporter"
+  ],
+  "namespace": [
+    "pionxzh"
+  ],
+  "version": [
+    "2.34.1"
+  ],
+  "author": [
+    "pionxzh"
+  ],
+  "description": [
+    "Export ChatGPT conversations with one click — backup & share effortlessly!"
+  ],
+  "description:zh-CN": [
+    "一键导出 ChatGPT 对话，轻松备份与分享"
+  ],
+  "description:zh-TW": [
+    "一鍵導出 ChatGPT 對話，輕鬆備份與分享"
+  ],
+  "license": [
+    "MIT"
+  ],
+  "icon": [
+    "https://chatgpt.com/favicon.ico"
+  ],
+  "match": [
+    "https://chat.openai.com/",
+    "https://chat.openai.com/?*",
+    "https://chat.openai.com/c/*",
+    "https://chat.openai.com/g/*",
+    "https://chat.openai.com/gpts",
+    "https://chat.openai.com/gpts/*",
+    "https://chat.openai.com/share/*",
+    "https://chat.openai.com/share/*/continue",
+    "https://chatgpt.com/",
+    "https://chatgpt.com/?*",
+    "https://chatgpt.com/c/*",
+    "https://chatgpt.com/g/*",
+    "https://chatgpt.com/gpts",
+    "https://chatgpt.com/gpts/*",
+    "https://chatgpt.com/share/*",
+    "https://chatgpt.com/share/*/continue"
+  ],
+  "require": [
+    "https://cdn.jsdelivr.net/npm/jszip@3.9.1/dist/jszip.min.js",
+    "https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"
+  ],
+  "grant": [
+    "GM_deleteValue",
+    "GM_getValue",
+    "GM_setValue",
+    "unsafeWindow"
+  ],
+  "run-at": [
+    "document-end"
+  ]
+}
+METADATA_CONTRACT=PASS

@@ -1,0 +1,57 @@
+{
+  "native": {
+    "registration": {
+      "id": "nano-userscript-poc",
+      "matches": [
+        "http://127.0.0.1/*",
+        "http://localhost/*"
+      ],
+      "runAt": "document_end",
+      "world": "MAIN",
+      "js": [
+        {
+          "file": "userscripts/mode-user-scripts.js"
+        },
+        {
+          "file": "userscripts/compat.js"
+        },
+        {
+          "file": "userscripts/fixture.user.js"
+        }
+      ]
+    },
+    "finalStatus": {
+      "runnerStatus": {
+        "ok": true,
+        "mode": "chrome.userScripts",
+        "checkedAt": "2026-08-26T02:06:42.275Z"
+      }
+    }
+  },
+  "fallback": {
+    "registration": {
+      "id": "nano-userscript-poc-packaged",
+      "matches": [
+        "http://127.0.0.1/*",
+        "http://localhost/*"
+      ],
+      "runAt": "document_end",
+      "world": "MAIN",
+      "persistAcrossSessions": true,
+      "js": [
+        "userscripts/mode-packaged.js",
+        "userscripts/compat.js",
+        "userscripts/fixture.user.js"
+      ]
+    },
+    "finalStatus": {
+      "runnerStatus": {
+        "ok": true,
+        "mode": "chrome.scripting.registerContentScripts",
+        "nativeUserScriptsError": "chrome.userScripts is undefined; enable Allow User Scripts for this extension",
+        "checkedAt": "2026-08-26T02:06:42.302Z"
+      }
+    }
+  }
+}
+NANOBROWSER_SERVICE_WORKER_LOGIC=PASS

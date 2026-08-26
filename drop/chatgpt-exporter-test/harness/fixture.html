@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>ChatGPT Exporter userscript runtime fixture</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 760px; margin: 3rem auto; padding: 0 1rem; }
+    nav { display: flex; gap: .75rem; align-items: center; padding: .75rem; border: 1px solid #aaa; border-radius: .75rem; }
+    #conversation { margin-top: 2rem; }
+    article { padding: 1rem; margin: .75rem 0; border: 1px solid #bbb; border-radius: .75rem; }
+    [data-role="user"] { background: #f5f5f5; }
+    [data-role="assistant"] { background: #fafafa; }
+    #fixture-menu { display: none; gap: .5rem; }
+    #fixture-menu[data-open="true"] { display: inline-flex; }
+  </style>
+</head>
+<body>
+  <nav>
+    <button data-testid="accounts-profile-button">Profile</button>
+    <span id="injection-target">Userscript has not loaded.</span>
+  </nav>
+  <main id="conversation">
+    <article data-role="user"><strong>You</strong><p>Does the userscript runner work?</p></article>
+    <article data-role="assistant"><strong>Assistant</strong><p>Yes. This is the local compatibility fixture.</p></article>
+  </main>
+</body>
+</html>

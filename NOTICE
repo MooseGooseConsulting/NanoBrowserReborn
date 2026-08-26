@@ -1,0 +1,16 @@
+Nano Reborn
+Copyright 2026 MooseGoose Consulting
+
+This product includes software developed from Nanobrowser
+(https://github.com/nanobrowser/nanobrowser), licensed under the Apache
+License, Version 2.0. See apps/extension/LICENSE and vendor/nanobrowser/LICENSE.
+
+This is an independent derivative. It is not affiliated with, endorsed by,
+or maintained by the Nanobrowser project or its core team.
+
+This product also includes:
+
+- Stagehand (https://github.com/browserbase/stagehand) — see vendor/stagehand
+  for its license.
+- ChatGPT Exporter (https://github.com/pionxzh/chatgpt-exporter) — MIT;
+  see vendor/chatgpt-exporter.

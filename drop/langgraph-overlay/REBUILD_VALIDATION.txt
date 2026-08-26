@@ -1,0 +1,18 @@
+Reconstructed bundle validation
+===============================
+Date: 2026-08-26
+Baseline: 24a14b76e14a9c30fd84878ca7985049d1e7d064
+
+Performed in reconstruction environment:
+- overlay/chrome-extension/package.json parses as JSON: PASS
+- scripts/apply-overlay.sh bash syntax: PASS
+- scripts/validate-langgraph-modernization.sh bash syntax: PASS
+- expected LangGraph source/test/guide files present: PASS
+
+Not performed here:
+- pnpm install
+- TypeScript type-check
+- Vitest execution
+- production extension build
+
+Reason: the reconstruction environment cannot reach registry.npmjs.org and did not retain the original node_modules/lockfile from the expired transient workspace. The included validation script performs those checks after dependencies are installed in the target checkout.

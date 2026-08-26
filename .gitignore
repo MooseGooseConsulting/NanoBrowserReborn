@@ -1,0 +1,41 @@
+# Dependencies and build
+node_modules/
+.pnpm-store/
+dist/
+build/
+out/
+*.tsbuildinfo
+.turbo/
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+credentials.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+*.log
+
+# Test / cache
+coverage/
+.cache/
+playwright-report/
+test-results/
+
+# Package manager noise
+pnpm-debug.log*
+npm-debug.log*
+yarn-error.log*
