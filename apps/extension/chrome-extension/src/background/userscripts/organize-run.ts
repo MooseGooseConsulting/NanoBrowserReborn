@@ -3,7 +3,12 @@ import { URLNotAllowedError } from '@src/background/browser/views';
 import {
   CHATGPT_ORGANIZE_SCRIPT_ID,
   contentScriptIdFor,
+  filesForMode,
+  FIXTURE_FILE,
+  isReviewedUserscriptId,
+  payloadFileFor,
   userScriptIdFor,
+  type UserscriptRegistrationMode,
 } from './catalog';
 import { assertUserscriptOrigin, isInjectableHttpUrl, WORLD, type UserscriptChromeApi } from './register';
 
@@ -43,6 +48,62 @@ type InjectionResult = { result?: ChatGptOrganizePageState };
 
 export function isChatGptOrganizeScript(scriptId: string): boolean {
   return scriptId === CHATGPT_ORGANIZE_SCRIPT_ID;
+}
+
+/**
+ * Fail closed if the selected id and the files about to be injected disagree.
+ * register.ts is the PR #2 blob (cannot edit here). #2 already keys
+ * filesForMode(mode, scriptId); this check still refuses a fixture leak.
+ */
+export function assertInjectedFilesMatchScript(scriptId: string, files: readonly string[]): void {
+  if (!isReviewedUserscriptId(scriptId)) {
+    throw new Error(`Unknown reviewed userscript id: ${scriptId}`);
+  }
+  const expected = payloadFileFor(scriptId);
+  if (!files.includes(expected)) {
+    throw new Error(`Refusing inject: selected ${scriptId} but files do not include ${expected} (${files.join(', ')})`);
+  }
+  if (isChatGptOrganizeScript(scriptId) && files.includes(FIXTURE_FILE)) {
+    throw new Error('Refusing inject: chatgpt-organize file list includes fixture.user.js');
+  }
+  const packaged = filesForMode('chrome.scripting.registerContentScripts', scriptId);
+  const native = filesForMode('chrome.userScripts', scriptId);
+  const sameAs = (wanted: string[]) => wanted.length === files.length && wanted.every((file, index) => file === files[index]);
+  if (!sameAs(packaged) && !sameAs(native)) {
+    throw new Error(`Refusing inject: file list for ${scriptId} is not a filesForMode result`);
+  }
+}
+
+/**
+ * One-shot MAIN-world inject. Does not registerContentScripts / userScripts.register
+ * (register.ts still uses persistAcrossSessions: false for fixture; organize must
+ * not leave a sticky content script on chatgpt.com).
+ */
+export async function executeChatGptOrganizeOnce(
+  api: UserscriptChromeApi,
+  tabId: number,
+): Promise<{ mode: UserscriptRegistrationMode; js: string[] }> {
+  const attempts: UserscriptRegistrationMode[] = [
+    'chrome.scripting.registerContentScripts',
+    'chrome.userScripts',
+  ];
+  let lastError: unknown;
+  for (const mode of attempts) {
+    const files = filesForMode(mode, CHATGPT_ORGANIZE_SCRIPT_ID);
+    assertInjectedFilesMatchScript(CHATGPT_ORGANIZE_SCRIPT_ID, files);
+    try {
+      await api.scripting.executeScript({
+        target: { tabId },
+        world: WORLD,
+        injectImmediately: true,
+        files,
+      });
+      return { mode, js: files };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError || 'chatgpt-organize executeScript failed'));
 }
 
 /** Origin / firewall gate before any MAIN-world inject. Does not edit register.ts. */

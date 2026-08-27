@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
@@ -24,6 +24,36 @@ function jsonResponse(status, body, statusText = 'OK') {
     status,
     statusText,
     json: async () => body,
+  };
+}
+
+function insertionOrderTrapConversation() {
+  return {
+    current_node: 'leaf',
+    mapping: {
+      decoy: {
+        id: 'decoy',
+        parent: 'root',
+        children: [],
+        message: {
+          author: { role: 'user' },
+          content: { parts: ['DECOY OBJECT.VALUES FIRST USER THAT IS LONG ENOUGH'] },
+        },
+      },
+      root: { id: 'root', parent: null, children: ['u1', 'decoy'], message: null },
+      u1: {
+        id: 'u1',
+        parent: 'root',
+        children: ['leaf'],
+        message: { author: { role: 'user' }, content: { parts: ['Compare local vLLM recipes for DeepSeek V4'] } },
+      },
+      leaf: {
+        id: 'leaf',
+        parent: 'u1',
+        children: [],
+        message: { author: { role: 'assistant' }, content: { parts: ['ok'] } },
+      },
+    },
   };
 }
 
@@ -202,6 +232,36 @@ describe('chatgpt-organize injected payload (mocked fetch)', () => {
     });
     expect(result.error).toMatch(/one-shot only/);
     expect(calls).toEqual([]);
+  });
+
+  it('titles from current_node parent walk, not Object.values insertion order', async () => {
+    const { result, calls } = await runInjectedPayload({
+      cookie: 'oai-did=device-from-cookie',
+      fetchImpl: async (url, init = {}) => {
+        if (url.endsWith('/api/auth/session')) {
+          return jsonResponse(200, { accessToken: 'session-token' });
+        }
+        if (url.includes('/backend-api/conversations?')) {
+          return jsonResponse(200, { items: [{ id: 'scrap-rename', title: 'New chat' }] });
+        }
+        if (url.endsWith('/backend-api/conversation/scrap-rename') && (!init.method || init.method === 'GET')) {
+          return jsonResponse(200, insertionOrderTrapConversation());
+        }
+        if (init.method === 'PATCH') {
+          return jsonResponse(200, { success: true });
+        }
+        return jsonResponse(404, {}, 'Not Found');
+      },
+    });
+    expect(result.mutations).toEqual([
+      { id: 'scrap-rename', action: 'rename', title: 'Compare local vLLM recipes for DeepSeek V4', ok: true },
+    ]);
+    expect(calls.filter(call => call.method === 'PATCH')[0].body).not.toMatch(/DECOY OBJECT\.VALUES/);
+    const mapping = insertionOrderTrapConversation().mapping;
+    const valuesFirstUser = Object.values(mapping)
+      .map(node => node && node.message)
+      .find(message => message && message.author && message.author.role === 'user');
+    expect(valuesFirstUser && valuesFirstUser.content.parts[0]).toMatch(/DECOY OBJECT\.VALUES/);
   });
 
   it('does not PATCH after the organize deadline is cancelled', async () => {
@@ -405,6 +465,8 @@ describe('chatgpt-organize catalog gates', () => {
   });
 
   it('asserts the injected file, not a TS helper, is the ChatGPT payload', () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    expect(existsSync(resolve(here, '../chatgpt-organize.ts'))).toBe(false);
     const src = payloadSource();
     expect(payloadFileFor('chatgpt-organize')).toBe(CHATGPT_ORGANIZE_FILE);
     expect(src).toContain('Authorization: `Bearer ${accessToken}`');

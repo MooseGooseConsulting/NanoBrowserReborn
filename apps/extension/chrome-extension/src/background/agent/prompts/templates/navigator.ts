@@ -94,7 +94,7 @@ Common action sequences:
 10. Userscript payloads:
 
 - Reviewed userscripts are harness PAYLOADS. script_id is a reviewed-id enum. script_id "fixture" is banner/counter inject proof.
-- script_id "chatgpt-organize" is the real organize job on chatgpt.com / chat.openai.com: same-origin fetch (session cookie → conversation JSON) then PATCH titles on scrap/untitled chats. The action waits until organize finishes. Signed-out or 401 is a failed action. Do not archive. Do not treat fixture injection as organize complete.
+- script_id "chatgpt-organize" is the real organize job on chatgpt.com / chat.openai.com: one-shot executeScript (not a sticky content script), same-origin fetch (session cookie → conversation JSON) then PATCH titles on scrap/untitled chats. The action waits until organize finishes. Signed-out or 401 is a failed action. Do not archive. Do not treat fixture injection as organize complete.
 - Do NOT use click_element to organize or export ChatGPT chats.
 
 11. Extraction:

@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  CHATGPT_ORGANIZE_FILE,
   CHATGPT_ORGANIZE_SCRIPT_ID,
   contentScriptIdFor,
+  FIXTURE_FILE,
+  PACKAGED_MODE_FILE,
+  COMPAT_FILE,
   userScriptIdFor,
 } from '../catalog';
 import { URLNotAllowedError } from '@src/background/browser/views';
@@ -10,7 +14,9 @@ import {
   armChatGptOrganizeRun,
   armOrganizeRunInPage,
   assertChatGptOrganizeTabAllowed,
+  assertInjectedFilesMatchScript,
   cancelOrganizeRunInPage,
+  executeChatGptOrganizeOnce,
   isChatGptOrganizeScript,
   ORGANIZE_DONE_TIMEOUT_MS,
   organizeActionFailure,
@@ -173,5 +179,58 @@ describe('chatgpt-organize action wait helpers', () => {
       },
     };
     await expect(unregisterChatGptOrganize(api)).resolves.toBeUndefined();
+  });
+
+  it('fails closed when selected id and injected files disagree', () => {
+    expect(() =>
+      assertInjectedFilesMatchScript(CHATGPT_ORGANIZE_SCRIPT_ID, [PACKAGED_MODE_FILE, COMPAT_FILE, FIXTURE_FILE]),
+    ).toThrow(/Refusing inject/);
+    expect(() => assertInjectedFilesMatchScript(CHATGPT_ORGANIZE_SCRIPT_ID, [FIXTURE_FILE])).toThrow(/Refusing inject/);
+    expect(() =>
+      assertInjectedFilesMatchScript(CHATGPT_ORGANIZE_SCRIPT_ID, [
+        PACKAGED_MODE_FILE,
+        COMPAT_FILE,
+        CHATGPT_ORGANIZE_FILE,
+      ]),
+    ).not.toThrow();
+  });
+
+  it('executeScript-only: never registerContentScripts or userScripts.register', async () => {
+    const calls: { register: unknown[]; userRegister: unknown[]; execute: unknown[] } = {
+      register: [],
+      userRegister: [],
+      execute: [],
+    };
+    const api: UserscriptChromeApi = {
+      userScripts: {
+        async register(scripts) {
+          calls.userRegister.push(scripts);
+        },
+        async unregister() {},
+      },
+      scripting: {
+        async registerContentScripts(scripts) {
+          calls.register.push(scripts);
+        },
+        async unregisterContentScripts() {},
+        async executeScript(injection) {
+          calls.execute.push(injection);
+          return [];
+        },
+      },
+    };
+    const injected = await executeChatGptOrganizeOnce(api, 11);
+    expect(injected.js).toEqual([PACKAGED_MODE_FILE, COMPAT_FILE, CHATGPT_ORGANIZE_FILE]);
+    expect(injected.js).not.toContain(FIXTURE_FILE);
+    expect(calls.register).toEqual([]);
+    expect(calls.userRegister).toEqual([]);
+    expect(calls.execute).toEqual([
+      {
+        target: { tabId: 11 },
+        world: 'MAIN',
+        injectImmediately: true,
+        files: [PACKAGED_MODE_FILE, COMPAT_FILE, CHATGPT_ORGANIZE_FILE],
+      },
+    ]);
   });
 });

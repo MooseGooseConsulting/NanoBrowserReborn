@@ -34,6 +34,7 @@ import { registerAndRunReviewedUserscript, type UserscriptChromeApi } from '@src
 import {
   armChatGptOrganizeRun,
   assertChatGptOrganizeTabAllowed,
+  executeChatGptOrganizeOnce,
   isChatGptOrganizeScript,
   organizeActionFailure,
   unregisterChatGptOrganize,
@@ -736,16 +737,8 @@ export class ActionBuilder {
         if (isOrganize) {
           assertChatGptOrganizeTabAllowed(tabUrl, firewall.allowedUrls, firewall.deniedUrls);
           await armChatGptOrganizeRun(api, page.tabId);
-        }
-        try {
-          const result = await registerAndRunReviewedUserscript(api, {
-            scriptId,
-            tabId: page.tabId,
-            tabUrl,
-            allowList: firewall.allowedUrls,
-            denyList: firewall.deniedUrls,
-          });
-          if (isOrganize) {
+          try {
+            const injected = await executeChatGptOrganizeOnce(api, page.tabId);
             const state = await waitForChatGptOrganizeDone(api, page.tabId);
             const failure = organizeActionFailure(state);
             if (failure) {
@@ -755,18 +748,24 @@ export class ActionBuilder {
             const successfulMutations = Array.isArray(state.mutations)
               ? state.mutations.filter(item => item && item.ok !== false).length
               : 0;
-            const msg = `${t('act_runUserscript_ok', [scriptId, result.mode])} listed ${state.listed ?? 0} · mutations ${successfulMutations}`;
+            const msg = `${t('act_runUserscript_ok', [scriptId, injected.mode])} listed ${state.listed ?? 0} · mutations ${successfulMutations}`;
             this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);
             return new ActionResult({ extractedContent: msg, includeInMemory: true });
-          }
-          const msg = t('act_runUserscript_ok', [scriptId, result.mode]);
-          this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);
-          return new ActionResult({ extractedContent: msg, includeInMemory: true });
-        } finally {
-          if (isOrganize) {
+          } finally {
             await unregisterChatGptOrganize(api);
           }
         }
+
+        const result = await registerAndRunReviewedUserscript(api, {
+          scriptId,
+          tabId: page.tabId,
+          tabUrl,
+          allowList: firewall.allowedUrls,
+          denyList: firewall.deniedUrls,
+        });
+        const msg = t('act_runUserscript_ok', [scriptId, result.mode]);
+        this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);
+        return new ActionResult({ extractedContent: msg, includeInMemory: true });
       } catch (error) {
         if (error instanceof URLNotAllowedError) {
           throw error;
