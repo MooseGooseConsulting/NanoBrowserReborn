@@ -95,13 +95,7 @@ export function createRunClock(): RunClock {
 }
 
 export function isRunning(clock: RunClock): boolean {
-  if (clock.lastEnqueuedAt == null) {
-    return false;
-  }
-  if (clock.turnCompleteAt == null) {
-    return true;
-  }
-  return clock.lastEnqueuedAt > clock.turnCompleteAt;
+  return clock.runningTurnId != null;
 }
 
 export function isQueued(clock: RunClock): boolean {
@@ -116,11 +110,11 @@ export function deriveRunPhase(clock: RunClock): RunPhase {
   if (isRunning(clock)) {
     return 'running';
   }
-  if (isQueued(clock)) {
-    return 'queued';
-  }
   if (clock.lastMessageIsError) {
     return 'error';
+  }
+  if (isQueued(clock)) {
+    return 'queued';
   }
   return 'waiting';
 }
@@ -198,19 +192,20 @@ export function enqueueRun(clock: RunClock, task: string, source: RunTurnSource,
   return item;
 }
 
-export function beginTurn(clock: RunClock, item: QueuedRun): void {
-  clock.lastEnqueuedAt = item.enqueuedAt;
+export function beginTurn(clock: RunClock, item: QueuedRun, now = Date.now()): void {
+  // lastEnqueuedAt is the turn-start marker, not the original queue timestamp.
+  clock.lastEnqueuedAt = now;
   clock.runningTurnSource = item.source;
   clock.runningTurnId = item.id;
   clock.lastMessageIsError = false;
 }
 
-export function dequeueAndBegin(clock: RunClock): QueuedRun | null {
+export function dequeueAndBegin(clock: RunClock, now = Date.now()): QueuedRun | null {
   const item = clock.pendingQueue.shift();
   if (!item) {
     return null;
   }
-  beginTurn(clock, item);
+  beginTurn(clock, item, now);
   return item;
 }
 
@@ -252,12 +247,12 @@ export class RunSession {
     return enqueueRun(this.clock, task, source, now);
   }
 
-  beginQueued(): QueuedRun | null {
-    return dequeueAndBegin(this.clock);
+  beginQueued(now?: number): QueuedRun | null {
+    return dequeueAndBegin(this.clock, now);
   }
 
-  begin(item: QueuedRun): void {
-    beginTurn(this.clock, item);
+  begin(item: QueuedRun, now?: number): void {
+    beginTurn(this.clock, item, now);
   }
 
   complete(options?: { output?: string | null; error?: boolean; now?: number }): void {

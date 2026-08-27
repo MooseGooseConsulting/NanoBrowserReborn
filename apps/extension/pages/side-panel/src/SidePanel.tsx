@@ -43,6 +43,7 @@ const SidePanel = () => {
   const runPhaseRef = useRef<'running' | 'queued' | 'waiting' | 'error'>('waiting');
   const sessionIdRef = useRef<string | null>(null);
   const isReplayingRef = useRef<boolean>(false);
+  const dispatchLockRef = useRef(false);
   const portRef = useRef<chrome.runtime.Port | null>(null);
   const heartbeatIntervalRef = useRef<number | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -167,8 +168,14 @@ const SidePanel = () => {
     if (run.phase === 'waiting' || run.phase === 'error') {
       setInputEnabled(true);
     }
+    if (run.running || run.queued) {
+      setInputEnabled(true);
+    }
     if (run.queued || run.running) {
       setIsFollowUpMode(true);
+      dispatchLockRef.current = true;
+    } else {
+      dispatchLockRef.current = false;
     }
   }, []);
 
@@ -352,6 +359,29 @@ const SidePanel = () => {
           });
           setInputEnabled(true);
           setShowStopButton(false);
+          dispatchLockRef.current = false;
+          runPhaseRef.current = 'waiting';
+          setRunPhase('waiting');
+          setRunHint(null);
+        } else if (message && message.type === 'run_state') {
+          const snapshot = message.snapshot;
+          if (snapshot) {
+            applyRunSnapshot({
+              phase: snapshot.phase,
+              running: snapshot.running,
+              queued: snapshot.queued,
+              runningTurnSource: snapshot.runningTurnSource,
+              runningTurnId: snapshot.runningTurnId,
+              pendingCount: snapshot.pendingQueue?.length ?? 0,
+              lastRunMessageRole: snapshot.lastRunMessageRole,
+              lastMessageIsError: snapshot.lastMessageIsError,
+              lastCompletedTurnId: snapshot.lastCompletedTurnId,
+              lastCompletedOutput: snapshot.lastCompletedOutput,
+              lastCompletedSource: snapshot.lastCompletedSource,
+              busyWithUser: snapshot.running && snapshot.runningTurnSource === 'user',
+              completionKind: snapshot.queued && snapshot.running ? 'previous_run' : snapshot.running ? 'in_flight' : 'idle',
+            });
+          }
         } else if (message && message.type === 'speech_to_text_result') {
           // Handle speech-to-text result
           if (message.text && setInputTextRef.current) {
@@ -400,6 +430,12 @@ const SidePanel = () => {
           stopConnection(); // Stop if port is invalid
         }
       }, 25000);
+
+      try {
+        portRef.current.postMessage({ type: 'run_state' });
+      } catch (error) {
+        console.error('Failed to request run_state:', error);
+      }
     } catch (error) {
       console.error('Failed to establish connection:', error);
       appendMessage({
@@ -410,7 +446,7 @@ const SidePanel = () => {
       // Clear any references since connection failed
       portRef.current = null;
     }
-  }, [handleTaskState, appendMessage, stopConnection]);
+  }, [handleTaskState, appendMessage, stopConnection, applyRunSnapshot]);
 
   // Add safety check for message sending
   const sendMessage = useCallback(
@@ -613,11 +649,22 @@ const SidePanel = () => {
         throw new Error('No active tab found');
       }
 
-      setInputEnabled(true);
       setShowStopButton(runPhaseRef.current === 'running');
 
+      const shouldFollowUp =
+        isFollowUpMode ||
+        runPhaseRef.current === 'running' ||
+        runPhaseRef.current === 'queued' ||
+        dispatchLockRef.current;
+
+      dispatchLockRef.current = true;
+
       // Create a new chat session for this task if not in follow-up mode
-      if (!isFollowUpMode) {
+      if (!shouldFollowUp) {
+        setInputEnabled(false);
+        setRunPhase('running');
+        runPhaseRef.current = 'running';
+        setShowStopButton(true);
         // Use display text for session title if available, otherwise use full text
         const titleText = displayText || text;
         const newSession = await chatHistoryStore.createSession(
@@ -645,9 +692,11 @@ const SidePanel = () => {
         setupConnection();
       }
 
-      // Follow-up while running/queued: enqueue. New session only when waiting/error and not follow-up.
-      const shouldFollowUp =
-        isFollowUpMode || runPhaseRef.current === 'running' || runPhaseRef.current === 'queued';
+      dispatchLockRef.current = true;
+      if (!shouldFollowUp) {
+        setShowStopButton(true);
+      }
+
       if (shouldFollowUp) {
         // Send as follow-up task
         await sendMessage({
@@ -666,9 +715,6 @@ const SidePanel = () => {
           tabId,
         });
         console.log('new_task sent', text, tabId, sessionIdRef.current);
-        setRunPhase('running');
-        runPhaseRef.current = 'running';
-        setShowStopButton(true);
       }
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
@@ -680,6 +726,10 @@ const SidePanel = () => {
       });
       setInputEnabled(true);
       setShowStopButton(false);
+      dispatchLockRef.current = false;
+      runPhaseRef.current = 'waiting';
+      setRunPhase('waiting');
+      setRunHint(null);
       stopConnection();
     }
   };
@@ -711,6 +761,10 @@ const SidePanel = () => {
     setShowStopButton(false);
     setIsFollowUpMode(false);
     setIsHistoricalSession(false);
+    dispatchLockRef.current = false;
+    runPhaseRef.current = 'waiting';
+    setRunPhase('waiting');
+    setRunHint(null);
 
     // Disconnect any existing connection
     stopConnection();

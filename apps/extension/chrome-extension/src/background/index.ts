@@ -361,10 +361,13 @@ async function subscribeToExecutorEvents(executor: Executor) {
       event.state === ExecutionState.TASK_FAIL ||
       event.state === ExecutionState.TASK_CANCEL
     ) {
-      const snapshot = currentExecutor?.getRunSnapshot();
-      const stillActive = snapshot?.running || (snapshot?.pendingQueue.length ?? 0) > 0;
+      if (currentExecutor !== executor) {
+        return;
+      }
+      const snapshot = executor.getRunSnapshot();
+      const stillActive = snapshot.running || snapshot.pendingQueue.length > 0;
       if (!stillActive) {
-        await currentExecutor?.cleanup();
+        await executor.cleanup();
       }
     }
   });

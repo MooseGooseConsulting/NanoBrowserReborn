@@ -192,10 +192,6 @@ export class Executor {
         break;
       }
 
-      if (this.context.runSession.snapshot().lastMessageIsError) {
-        break;
-      }
-
       if (this.context.runSession.snapshot().pendingQueue.length === 0) {
         break;
       }
@@ -427,6 +423,10 @@ export class Executor {
 
   async resume(): Promise<void> {
     this.context.resume();
+    const snapshot = this.context.runSession.snapshot();
+    if (!this.executeLoop && snapshot.pendingQueue.length > 0) {
+      void this.execute();
+    }
   }
 
   async pause(): Promise<void> {
@@ -459,6 +459,33 @@ export class Executor {
     maxRetries = 3,
     skipFailures = true,
     delayBetweenActions = 2.0,
+  ): Promise<ActionResult[]> {
+    if (this.executeLoop) {
+      await this.executeLoop;
+    }
+
+    let results: ActionResult[] = [];
+    this.executeLoop = (async () => {
+      results = await this.runReplayHistory(sessionId, maxRetries, skipFailures, delayBetweenActions);
+      if (!this.context.stopped && this.context.runSession.snapshot().pendingQueue.length > 0) {
+        await this.drainTurns('user');
+      }
+    })();
+
+    try {
+      await this.executeLoop;
+    } finally {
+      this.executeLoop = null;
+    }
+
+    return results;
+  }
+
+  private async runReplayHistory(
+    sessionId: string,
+    maxRetries: number,
+    skipFailures: boolean,
+    delayBetweenActions: number,
   ): Promise<ActionResult[]> {
     const results: ActionResult[] = [];
     const replayLogger = createLogger('Executor:replayHistory');

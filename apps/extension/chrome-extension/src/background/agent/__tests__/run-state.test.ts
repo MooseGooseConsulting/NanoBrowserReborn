@@ -6,6 +6,7 @@ import {
   completeTurn,
   createRunClock,
   deriveRunPhase,
+  dequeueAndBegin,
   enqueueRun,
   isBusyWith,
   isQueued,
@@ -18,7 +19,7 @@ describe('four-state run model', () => {
     const clock = createRunClock();
     const item = enqueueRun(clock, 'first', 'user', 100);
     clock.pendingQueue.shift();
-    beginTurn(clock, item);
+    beginTurn(clock, item, 100);
     completeTurn(clock, { output: 'done', now: 200 });
 
     expect(isRunning(clock)).toBe(false);
@@ -32,7 +33,7 @@ describe('four-state run model', () => {
     const item = enqueueRun(clock, 'user task', 'user', 100);
     // dequeue so pendingQueue is empty — this is in-flight user work
     clock.pendingQueue.shift();
-    beginTurn(clock, item);
+    beginTurn(clock, item, 100);
 
     expect(clock.lastEnqueuedAt).toBe(100);
     expect(clock.turnCompleteAt).toBeNull();
@@ -55,7 +56,7 @@ describe('four-state run model', () => {
     const clock = createRunClock();
     const item = enqueueRun(clock, 'failing', 'user', 100);
     clock.pendingQueue.shift();
-    beginTurn(clock, item);
+    beginTurn(clock, item, 100);
     completeTurn(clock, { error: true, output: 'boom', now: 200 });
 
     expect(clock.lastMessageIsError).toBe(true);
@@ -70,7 +71,7 @@ describe('trap: running is not busy with your work', () => {
     const clock = createRunClock();
     const replay = enqueueRun(clock, 'replay session', 'replay', 50);
     clock.pendingQueue.shift();
-    beginTurn(clock, replay);
+    beginTurn(clock, replay, 50);
 
     expect(deriveRunPhase(clock)).toBe('running');
     expect(clock.runningTurnSource).toBe('replay');
@@ -95,12 +96,12 @@ describe('trap: queued while running collects the previous run', () => {
     const clock = createRunClock();
     const previous = enqueueRun(clock, 'first turn', 'user', 100);
     clock.pendingQueue.shift();
-    beginTurn(clock, previous);
+    beginTurn(clock, previous, 100);
     completeTurn(clock, { output: 'first answer', now: 200 });
 
     const held = enqueueRun(clock, 'cron/webhook hold', 'system', 300);
     clock.pendingQueue.shift();
-    beginTurn(clock, held);
+    beginTurn(clock, held, 300);
     enqueueRun(clock, 'your next prompt', 'user', 400);
 
     expect(isRunning(clock)).toBe(true);
@@ -121,12 +122,43 @@ describe('trap: queued while running collects the previous run', () => {
 
   it('does not report queued work as complete until it has started', () => {
     const session = new RunSession();
-    session.begin({ id: 'prev', task: 'running now', enqueuedAt: 1, source: 'replay' });
+    session.begin({ id: 'prev', task: 'running now', enqueuedAt: 1, source: 'replay' }, 10);
     const queued = session.enqueue('not started', 'user', 2);
     const collected = session.collectCompletion();
 
     expect(collected.kind).toBe('previous_run');
     expect(session.snapshot().pendingQueue.map(item => item.id)).toContain(queued.id);
     expect(collected.turnId).toBe('prev');
+  });
+
+  it('marks a dequeued follow-up as running even when it was enqueued before the previous turn completed', () => {
+    const clock = createRunClock();
+    const first = enqueueRun(clock, 'first', 'user', 100);
+    clock.pendingQueue.shift();
+    beginTurn(clock, first, 100);
+    completeTurn(clock, { output: 'first answer', now: 200 });
+
+    const followUp = enqueueRun(clock, 'follow-up', 'user', 150);
+    expect(followUp.enqueuedAt).toBeLessThan(200);
+    const started = dequeueAndBegin(clock, 250);
+
+    expect(started?.id).toBe(followUp.id);
+    expect(isRunning(clock)).toBe(true);
+    expect(clock.lastEnqueuedAt).toBe(250);
+    expect(clock.lastEnqueuedAt! > clock.turnCompleteAt!).toBe(true);
+    expect(deriveRunPhase(clock)).toBe('running');
+  });
+
+  it('reports error rather than queued when the last turn failed with work still pending', () => {
+    const clock = createRunClock();
+    const failed = enqueueRun(clock, 'failing', 'user', 100);
+    clock.pendingQueue.shift();
+    beginTurn(clock, failed, 100);
+    completeTurn(clock, { error: true, output: 'boom', now: 200 });
+    enqueueRun(clock, 'later', 'user', 250);
+
+    expect(isRunning(clock)).toBe(false);
+    expect(isQueued(clock)).toBe(true);
+    expect(deriveRunPhase(clock)).toBe('error');
   });
 });
