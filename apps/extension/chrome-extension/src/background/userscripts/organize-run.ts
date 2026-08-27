@@ -1,9 +1,12 @@
+import { createLogger } from '@src/background/log';
 import {
   CHATGPT_ORGANIZE_SCRIPT_ID,
   contentScriptIdFor,
   userScriptIdFor,
 } from './catalog';
 import { WORLD, type UserscriptChromeApi } from './register';
+
+const logger = createLogger('Userscripts');
 
 /**
  * ChatGPT organize is async after inject. Chrome waits on executeScript when
@@ -28,7 +31,12 @@ export function isChatGptOrganizeScript(scriptId: string): boolean {
 
 /** Serialized into the tab MAIN world. Do not close over module locals. */
 export function armOrganizeRunInPage(): void {
-  (globalThis as { __nanoOrganizeRun?: boolean }).__nanoOrganizeRun = true;
+  const g = globalThis as {
+    __nanoOrganizeRun?: boolean;
+    __nanoChatGptOrganize?: ChatGptOrganizePageState;
+  };
+  g.__nanoOrganizeRun = true;
+  delete g.__nanoChatGptOrganize;
 }
 
 /** Serialized into the tab MAIN world. Chrome awaits this Promise. */
@@ -97,12 +105,12 @@ export async function unregisterChatGptOrganize(api: UserscriptChromeApi): Promi
     if (api.userScripts) {
       await api.userScripts.unregister({ ids: [userScriptIdFor(CHATGPT_ORGANIZE_SCRIPT_ID)] });
     }
-  } catch {
-    // best-effort; leftover register is worse than a failed unregister
+  } catch (error) {
+    logger.warning('unregister userScripts failed', error);
   }
   try {
     await api.scripting.unregisterContentScripts({ ids: [contentScriptIdFor(CHATGPT_ORGANIZE_SCRIPT_ID)] });
-  } catch {
-    // best-effort
+  } catch (error) {
+    logger.warning('unregisterContentScripts failed', error);
   }
 }

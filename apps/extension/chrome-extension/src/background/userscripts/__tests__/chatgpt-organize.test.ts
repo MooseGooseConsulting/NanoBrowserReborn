@@ -197,6 +197,33 @@ describe('chatgpt-organize injected payload (mocked fetch)', () => {
     expect(calls).toEqual([]);
   });
 
+  it('sends Bearer without inventing Oai-Device-Id when oai-did is missing', async () => {
+    const { result, calls } = await runInjectedPayload({
+      cookie: '_account=acct-99',
+      fetchImpl: async (url, init = {}) => {
+        if (url.endsWith('/api/auth/session')) {
+          return jsonResponse(200, { accessToken: 'session-token' });
+        }
+        if (url.includes('/backend-api/conversations?')) {
+          return jsonResponse(200, { items: [{ id: 'named-keep', title: 'Monitor upgrade decision' }] });
+        }
+        if (url.endsWith('/backend-api/conversation/named-keep') && (!init.method || init.method === 'GET')) {
+          return jsonResponse(200, { current_node: 'root', mapping: { root: { parent: null, children: [], message: null } } });
+        }
+        return jsonResponse(404, {}, 'Not Found');
+      },
+    });
+    expect(result.signedIn).toBe(true);
+    const backendCalls = calls.filter(call => call.url.includes('/backend-api/'));
+    expect(backendCalls.length).toBeGreaterThan(0);
+    for (const call of backendCalls) {
+      expect(call.headers.Authorization).toBe('Bearer session-token');
+      expect(call.headers).not.toHaveProperty('Oai-Device-Id');
+      expect(call.headers['Chatgpt-Account-Id']).toBe('acct-99');
+    }
+    expect(calls.some(call => call.headers['Oai-Device-Id'] === '11111111-1111-4111-8111-111111111111')).toBe(false);
+  });
+
   it('treats session 401 as done with an error and does not list or PATCH', async () => {
     const { result, calls } = await runInjectedPayload({
       fetchImpl: async url => {
@@ -308,6 +335,8 @@ describe('chatgpt-organize catalog gates', () => {
     expect(src).toContain('__nanoOrganizeRun');
     expect(src).toContain('__nanoChatGptOrganize');
     expect(src).not.toContain('is_archived');
+    expect(src).not.toContain('randomUUID');
+    expect(src).not.toContain('chatgpt-organize:device-id');
     expect(src).not.toMatch(/Object\.values\(mapping\)/);
   });
 });
