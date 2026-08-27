@@ -2,42 +2,75 @@
 
 Patrick's personal LLM web harness (Leader/Follower). Not a product.
 
-Userscripts are **payloads** the harness injects, runs, and rewrites. One job of that pipeline is to keep those scripts current and organize ChatGPT scrap chats.
+Userscripts are **reviewed payloads** the harness injects, runs, and rewrites. One job of that pipeline is to keep those scripts current and organize ChatGPT scrap chats.
 
-Set-of-marks is **optional**. Do not rebuild `buildDomTree` / `highlightIndex`. Do not start the Stagehand host in the userscript slice. Do not apply the LangGraph overlay. Do not invent a new repo. Spec Kit is not the process. `drop/` is historical.
+This file is the **only** forward map. There is no older work order. Do **not** do BrowserPort first. Do **not** rebase LangGraph before userscripts.
 
-Work in `apps/extension` (and later `apps/stagehand-host`). `vendor/` is frozen.
+Set-of-marks is **optional**. Do not rebuild `buildDomTree` / `highlightIndex`. Do not invent a new repo. Spec Kit is not the process. `drop/` is historical. `vendor/` is frozen. Work in `apps/extension` (and later `apps/stagehand-host`).
 
-## This slice: harden the userscript registration helper
+Do **not** implement items 2–4 in the current PR. Do **not** open a second PR for them from this branch.
 
-Executor action `run_userscript` already registers and runs a **reviewed** fixture payload. This slice hardens that helper:
+## The only plan
 
-- Registration matches are the current tab origin only (no ports, no `http(s)://*/*` fallback, no model `*://*/*`).
-- Fall back to `chrome.userScripts` only when packaged **registration** fails. If `runOnTab` fails after a successful packaged register, unregister and throw.
-- Immediate run always uses `chrome.scripting.executeScript`. `chrome.userScripts.execute` (Chrome 135+) is unused.
-- Require a real injectable http(s) tab URL before any persistent registration.
-- Pass existing BrowserContext allow/deny lists into the helper. Marks stay off.
+1. **This PR** — `run_userscript` runner + fixture payload. Merge after review comments are clean.
+2. **Next PR** — ChatGPT organize payload on that runner. Same-origin fetch. A real job. Not `click_element`.
+3. **Then** — payload rewrite / keep-current, several times a day.
+4. **Later, not this week** — Hyperagent observe; Stagehand host after a real CDP 5-step; four-state completion; MCP/REST; LangGraph; marks/SAM.
 
-Fixture banner/counter remains the only payload. Do **not** implement ChatGPT export/scrape in this slice.
+## This PR (item 1)
 
-## Next slice
+Executor action `run_userscript` registers and runs a **reviewed** fixture banner/counter. That is the whole ship.
 
-ChatGPT organize payload on the same registration helper, using **same-origin fetch**, not `click_element`.
+- Packaged `chrome.scripting.registerContentScripts` first (MAIN, `document_end`, `persistAcrossSessions`).
+- Fall back to `chrome.userScripts.register` only when packaged **registration** itself fails.
+- Immediate run always `chrome.scripting.executeScript`. `chrome.userScripts.execute` is unused.
+- Matches: current-tab origin only, portless. No `http(s)://*/*` fallback. No model `*://*/*`.
+- BrowserContext allow/deny lists apply to the tab URL and to matches.
+- If packaged register succeeds and `runOnTab` fails: unregister and throw. Same cleanup on the userScripts path.
+- Navigator schema and prompt: only `fixture` is registered. Do not use `run_userscript` for ChatGPT organize.
 
-## Later (not this slice)
+Do **not** start Hyperagent, Stagehand, four-state completion, MCP/REST, LangGraph, or marks in this PR.
 
-- Stagehand host (`BrowserPort` / CDP). No host code until the five-step gate below has been run once.
-- LangGraph overlay rebase onto Executor (pause/resume/cancel, side-panel events, `iteration` vs `navigationSteps`).
-- Marks: measure `buildDomTree` volume; route observe through Stagehand; SAM 3 only if observe is not enough.
-- Config save/restore/validate on existing stores (`llm-api-keys`, `agent-models`, `general-settings`).
+## Next PR (item 2)
 
-Do not start with MarkMap, SQLite, or Spec Kit regeneration.
+ChatGPT organize on the same helper. Same-origin `fetch` against chatgpt.com APIs. Not `click_element`. Not a new runner.
 
-## Test gates (run these; do not claim from reading)
+Unproven until a **logged-in `chatgpt.com` tab**. Mocked unit tests are not that proof.
 
-### Extension
+## Then (item 3)
 
-From `apps/extension` after `corepack pnpm install`:
+Rewrite / keep-current the payloads as ChatGPT's DOM and APIs drift. Several times a day is the expected cadence, not a later project.
+
+## Later, not this week (item 4)
+
+Do not start these from this PR:
+
+- Hyperagent observe
+- Stagehand host, and only after a real CDP 5-step has been run once (connect, observe, one `act`, teardown that leaves Chrome running)
+- Four-state completion
+- MCP / REST
+- LangGraph overlay (pause/resume/cancel, side-panel events, `iteration` vs `navigationSteps`)
+- Marks / SAM (measure `buildDomTree` volume; route observe through Stagehand; SAM 3 only if observe is not enough)
+
+No host code until that CDP 5-step has been run once. Do not start with MarkMap, SQLite, or Spec Kit regeneration.
+
+## Gates that stay
+
+**Mocked unit tests are not enough.**
+
+**Human gate for this PR:** load unpacked `dist`, open a real http(s) tab, run the fixture, **see the banner on that tab**. Characterization still holds: Navigator is required to start a task; the side panel must not say ready without Navigator (`drop/handoff/CODE_CONFIGURATION_FINDINGS.md`).
+
+**ChatGPT organize is unproven** until it has been run on a logged-in `chatgpt.com` tab. That is the next PR's gate, not this one's.
+
+Automated coverage for the runner (necessary, not sufficient):
+
+```text
+pnpm -F chrome-extension test
+```
+
+Must cover packaged `registerContentScripts` first, `chrome.userScripts` fallback only after registration failure, origin-only matches (no model `*://*/*`, no all-sites fallback, portless patterns), MAIN world, `document_end`, and injection-safety URL blocks. No ChatGPT login in this PR. Navigator prompt must not claim ChatGPT organize/export is a registered payload.
+
+From `apps/extension` after `corepack pnpm install`, still run:
 
 ```text
 pnpm type-check
@@ -45,33 +78,7 @@ pnpm build
 pnpm -F chrome-extension test
 ```
 
-Load `dist` unpacked. Confirm side panel opens. Characterization: Navigator is required to start a task; side panel must not say ready without Navigator (`drop/handoff/CODE_CONFIGURATION_FINDINGS.md`).
-
-### Userscript runner
-
-```text
-pnpm -F chrome-extension test
-```
-
-Must cover packaged `registerContentScripts` first, `chrome.userScripts` fallback only after registration failure, origin-only matches (no model `*://*/*`, no all-sites fallback, portless patterns), MAIN world, `document_end`, and injection-safety URL blocks. No ChatGPT login. Navigator prompt must not claim ChatGPT organize/export is a registered payload.
-
 POC under `drop/chatgpt-exporter-test/nanobrowser-poc` remains historical proof (`node unit_service_worker.mjs`). The live helper is a TypeScript port in `apps/extension` because the extension module graph does not import `drop/`.
-
-Existing overlay tests (after rebase, not before):
-
-```text
-drop/langgraph-overlay/overlay/chrome-extension/src/background/agent/__tests__/execution-graph.test.ts
-```
-
-### Stagehand host (when it exists)
-
-1. Launch Chrome with `--remote-debugging-port=9222` on a profile you control.
-2. Host connects with `localBrowser.connect({ cdpUrl })` then `Stagehand.create({ browser })`.
-3. `observe` one instruction on the active page.
-4. `act` one single-step click (or click `actions[0].selector` if observe returns locators).
-5. Teardown must leave Chrome running.
-
-No host code ships until those five steps have been run once.
 
 ## Preserve
 
