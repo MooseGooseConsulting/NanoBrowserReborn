@@ -22,12 +22,15 @@ import {
   nextPageActionSchema,
   scrollToTopActionSchema,
   scrollToBottomActionSchema,
+  runUserscriptActionSchema,
 } from './schemas';
 import { z } from 'zod';
 import { createLogger } from '@src/background/log';
 import { ExecutionState, Actors } from '../event/types';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { wrapUntrustedContent } from '../messages/utils';
+import { URLNotAllowedError } from '@src/background/browser/views';
+import { registerAndRunReviewedUserscript, type UserscriptChromeApi } from '@src/background/userscripts/register';
 
 const logger = createLogger('Action');
 
@@ -701,6 +704,36 @@ export class ActionBuilder {
       true,
     );
     actions.push(selectDropdownOption);
+
+    const runUserscript = new Action(async (input: z.infer<typeof runUserscriptActionSchema.schema>) => {
+      const scriptId = input.script_id || 'fixture';
+      const intent = input.intent || t('act_runUserscript_start', [scriptId]);
+      this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_START, intent);
+
+      const page = await this.context.browserContext.getCurrentPage();
+      const tab = await chrome.tabs.get(page.tabId);
+      const tabUrl = tab.url || page.url();
+
+      try {
+        const result = await registerAndRunReviewedUserscript(chrome as UserscriptChromeApi, {
+          scriptId,
+          tabId: page.tabId,
+          tabUrl,
+          matches: input.matches,
+        });
+        const msg = t('act_runUserscript_ok', [scriptId, result.mode]);
+        this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);
+        return new ActionResult({ extractedContent: msg, includeInMemory: true });
+      } catch (error) {
+        if (error instanceof URLNotAllowedError) {
+          throw error;
+        }
+        const msg = error instanceof Error ? error.message : String(error);
+        this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_FAIL, msg);
+        return new ActionResult({ error: msg, includeInMemory: true });
+      }
+    }, runUserscriptActionSchema);
+    actions.push(runUserscript);
 
     return actions;
   }

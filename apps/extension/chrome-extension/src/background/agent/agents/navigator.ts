@@ -28,6 +28,7 @@ import { convertZodToJsonSchema, repairJsonString } from '@src/background/utils'
 import { HistoryTreeProcessor } from '@src/background/browser/dom/history/service';
 import { AgentStepRecord } from '../history';
 import { type DOMHistoryElement } from '@src/background/browser/dom/history/view';
+import { RUN_USERSCRIPT_ACTION } from '../actions/schemas';
 
 const logger = createLogger('NavigatorAgent');
 
@@ -369,10 +370,17 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
     logger.info('Actions', actions);
 
     const browserContext = this.context.browserContext;
-    const browserState = await browserContext.getState(this.context.options.useVision);
-    const cachedPathHashes = await calcBranchPathHashSet(browserState);
+    const isUserscriptOnly =
+      actions.length > 0 && actions.every(action => Object.keys(action)[0] === RUN_USERSCRIPT_ACTION);
 
-    await browserContext.removeHighlight();
+    // Userscript payloads inject in MAIN world; do not build set-of-marks for that action.
+    let browserState: BrowserState | null = null;
+    let cachedPathHashes: Set<string> | undefined;
+    if (!isUserscriptOnly) {
+      browserState = await browserContext.getState(this.context.options.useVision);
+      cachedPathHashes = await calcBranchPathHashSet(browserState);
+      await browserContext.removeHighlight();
+    }
 
     for (const [i, action] of actions.entries()) {
       const actionName = Object.keys(action)[0];
@@ -393,7 +401,7 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
           const newState = await browserContext.getState(this.context.options.useVision);
           const newPathHashes = await calcBranchPathHashSet(newState);
           // next action requires index but there are new elements on the page
-          if (!newPathHashes.isSubsetOf(cachedPathHashes)) {
+          if (cachedPathHashes && !newPathHashes.isSubsetOf(cachedPathHashes)) {
             const msg = `Something new appeared after action ${i} / ${actions.length}`;
             logger.info(msg);
             results.push(
@@ -412,7 +420,7 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
         }
 
         // if the action has an index argument, record the interacted element to the result
-        if (indexArg !== null) {
+        if (indexArg !== null && browserState) {
           const domElement = browserState.selectorMap.get(indexArg);
           if (domElement) {
             const interactedElement = HistoryTreeProcessor.convertDomElementToHistoryElement(domElement);

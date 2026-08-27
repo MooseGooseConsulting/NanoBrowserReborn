@@ -213,3 +213,16 @@ export const waitActionSchema: ActionSchema = {
     seconds: z.number().int().default(3).describe('amount of seconds'),
   }),
 };
+
+export const RUN_USERSCRIPT_ACTION = 'run_userscript';
+
+export const runUserscriptActionSchema: ActionSchema = {
+  name: RUN_USERSCRIPT_ACTION,
+  description:
+    'Register and run a reviewed userscript payload in the page MAIN world. Prefer this over click_element for site-specific organize/export jobs. script_id "fixture" injects a banner/counter (not ChatGPT export). ChatGPT organize is a later payload using same-origin fetch.',
+  schema: z.object({
+    intent: z.string().default('').describe('purpose of this action'),
+    script_id: z.string().default('fixture').describe('reviewed payload id (fixture in this slice)'),
+    matches: z.array(z.string()).optional().describe('optional match patterns; defaults to the current page origin'),
+  }),
+};

@@ -966,5 +966,27 @@
         "example": "Opção não encontrada"
       }
     }
+  },
+  "act_runUserscript_start": {
+    "message": "Registrando e executando o userscript $SCRIPT_ID$",
+    "placeholders": {
+      "script_id": {
+        "content": "$1",
+        "example": "fixture"
+      }
+    }
+  },
+  "act_runUserscript_ok": {
+    "message": "Userscript revisado $SCRIPT_ID$ executado via $MODE$",
+    "placeholders": {
+      "script_id": {
+        "content": "$1",
+        "example": "fixture"
+      },
+      "mode": {
+        "content": "$2",
+        "example": "chrome.scripting.registerContentScripts"
+      }
+    }
   }
 }
