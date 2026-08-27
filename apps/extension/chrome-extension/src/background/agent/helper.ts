@@ -17,11 +17,15 @@ class ChatLlama extends ChatOpenAI {
     super(args);
   }
 
-  // Override the completionWithRetry method to intercept and transform the response
+  // LangChain 0.6 keeps completionWithRetry on the inner Completions client, not ChatOpenAI.
   async completionWithRetry(request: any, options?: any): Promise<any> {
     try {
-      // Make the request using the parent's implementation
-      const response = await super.completionWithRetry(request, options);
+      const completions = (
+        this as unknown as {
+          completions: { completionWithRetry: (request: any, options?: any) => Promise<any> };
+        }
+      ).completions;
+      const response = await completions.completionWithRetry(request, options);
 
       // Check if this is a Llama API response format
       if (response?.completion_message?.content?.text) {
