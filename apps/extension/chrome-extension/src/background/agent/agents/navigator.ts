@@ -28,7 +28,7 @@ import { convertZodToJsonSchema, repairJsonString } from '@src/background/utils'
 import { HistoryTreeProcessor } from '@src/background/browser/dom/history/service';
 import { AgentStepRecord } from '../history';
 import { type DOMHistoryElement } from '@src/background/browser/dom/history/view';
-import { RUN_USERSCRIPT_ACTION } from '../actions/schemas';
+import { isUserscriptOnlyAction } from '../actions/schemas';
 
 const logger = createLogger('NavigatorAgent');
 
@@ -373,7 +373,8 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
     const isUserscriptOnly =
       actions.length > 0 &&
       actions.every(
-        action => typeof action === 'object' && action !== null && Object.keys(action)[0] === RUN_USERSCRIPT_ACTION,
+        action =>
+          typeof action === 'object' && action !== null && isUserscriptOnlyAction(Object.keys(action)[0]),
       );
 
     // Userscript payloads inject in MAIN world; do not build set-of-marks for that action.

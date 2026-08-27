@@ -1,10 +1,13 @@
 import {
+  CHATGPT_ORGANIZE_SCRIPT_ID,
   helperFilesForMode,
   isReviewedUserscriptId,
   PAYLOAD_IDENTITY_HOOKS,
+  REVIEWED_USERSCRIPT_HOSTS,
   type ReviewedUserscriptId,
   type UserscriptRegistrationMode,
 } from './catalog';
+import { assertSourceMatchesChatGptOrganizeContract } from './chatgpt-organize-contract';
 import {
   assertOverlayMatchesScript,
   deleteOverlay,
@@ -66,15 +69,39 @@ export function validateOverlaySource(scriptId: string, source: unknown): assert
       throw new Error(`rewrite_userscript source for ${scriptId} must include ${hook}`);
     }
   }
+  if (scriptId === CHATGPT_ORGANIZE_SCRIPT_ID) {
+    assertSourceMatchesChatGptOrganizeContract(source);
+  }
 }
 
 /**
  * Serialized into the tab MAIN world. Do not close over module locals.
  * Evaluates overlay bytes in-page so they never travel through a blob:/data: URL.
+ * Live location is checked in this same invocation so a tab navigation cannot
+ * bypass the origin lock between helper inject and source eval.
  */
-export function injectUserscriptSourceInPage(source: string): void {
+export function injectUserscriptSourceInPage(source: string, allowedHosts: readonly string[] = []): void {
   if (typeof source !== 'string' || !source) {
     throw new Error('overlay source is empty');
+  }
+  let href = '';
+  try {
+    href = String((globalThis as { location?: { href?: string } }).location?.href || '');
+  } catch {
+    href = '';
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(href);
+  } catch {
+    throw new Error('overlay inject refused: page URL is not injectable');
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`overlay inject refused: ${parsed.protocol} is not allowed`);
+  }
+  const hosts = Array.isArray(allowedHosts) ? allowedHosts : [];
+  if (hosts.length && !hosts.includes(parsed.hostname)) {
+    throw new Error(`overlay inject refused: ${parsed.hostname} is not allowed`);
   }
   const run = globalThis.eval;
   run(source);
@@ -113,22 +140,10 @@ export async function resolveRunSource(
   return getOverlayForScript(storage, scriptId);
 }
 
-/**
- * One-shot MAIN-world inject of helper files + overlay source via func/args.
- * Does not registerContentScripts (packaged seed registration would re-inject the seed).
- * Does not pass source through a page URL.
- */
-export async function injectReviewedOverlay(
+async function injectHelperFiles(
   api: UserscriptChromeApi,
   tabId: number,
-  overlay: UserscriptOverlay,
-  scriptId: string,
-): Promise<OverlayInjectResult> {
-  if (!isReviewedUserscriptId(scriptId)) {
-    throw new Error(`Unknown reviewed userscript id: ${scriptId}`);
-  }
-  assertOverlayMatchesScript(overlay, scriptId);
-
+): Promise<string[]> {
   const attempts: UserscriptRegistrationMode[] = [
     'chrome.scripting.registerContentScripts',
     'chrome.userScripts',
@@ -143,24 +158,46 @@ export async function injectReviewedOverlay(
         injectImmediately: true,
         files: helpers,
       });
-      await api.scripting.executeScript({
-        target: { tabId },
-        world: WORLD,
-        injectImmediately: true,
-        args: [overlay.source],
-        func: injectUserscriptSourceInPage,
-      });
-      return {
-        mode: OVERLAY_INJECT_MODE,
-        scriptId,
-        js: [...helpers, `overlay:${overlay.scriptId}:${overlay.sourceHash}`],
-        sourceHash: overlay.sourceHash,
-      };
+      return helpers;
     } catch (error) {
       lastError = error;
     }
   }
   throw lastError instanceof Error
     ? lastError
-    : new Error(String(lastError || 'overlay executeScript failed'));
+    : new Error(String(lastError || 'overlay helper executeScript failed'));
+}
+
+/**
+ * One-shot MAIN-world inject of helper files + overlay source via func/args.
+ * Does not registerContentScripts (packaged seed registration would re-inject the seed).
+ * Does not pass source through a page URL.
+ * Helper-file fallback happens before source evaluation; the overlay is never eval'd twice.
+ */
+export async function injectReviewedOverlay(
+  api: UserscriptChromeApi,
+  tabId: number,
+  overlay: UserscriptOverlay,
+  scriptId: string,
+): Promise<OverlayInjectResult> {
+  if (!isReviewedUserscriptId(scriptId)) {
+    throw new Error(`Unknown reviewed userscript id: ${scriptId}`);
+  }
+  assertOverlayMatchesScript(overlay, scriptId);
+
+  const helpers = await injectHelperFiles(api, tabId);
+  const allowedHosts = [...REVIEWED_USERSCRIPT_HOSTS[scriptId]];
+  await api.scripting.executeScript({
+    target: { tabId },
+    world: WORLD,
+    injectImmediately: true,
+    args: [overlay.source, allowedHosts],
+    func: injectUserscriptSourceInPage,
+  });
+  return {
+    mode: OVERLAY_INJECT_MODE,
+    scriptId,
+    js: [...helpers, `overlay:${overlay.scriptId}:${overlay.sourceHash}`],
+    sourceHash: overlay.sourceHash,
+  };
 }

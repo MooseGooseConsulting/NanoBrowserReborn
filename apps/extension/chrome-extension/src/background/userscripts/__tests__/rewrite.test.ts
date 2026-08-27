@@ -9,7 +9,7 @@ import {
   FIXTURE_SCRIPT_ID,
   PACKAGED_MODE_FILE,
 } from '../catalog';
-import { createMemoryOverlayStorage, getOverlayForScript, type UserscriptOverlay } from '../overlay';
+import { createMemoryOverlayStorage, getOverlayForScript, overlayStorageKeyFor, type UserscriptOverlay } from '../overlay';
 import {
   injectReviewedOverlay,
   injectUserscriptSourceInPage,
@@ -23,6 +23,7 @@ import { URLNotAllowedError } from '@src/background/browser/views';
 import { assertChatGptOrganizeTabAllowed } from '../organize-run';
 import type { UserscriptChromeApi } from '../register';
 import {
+  isUserscriptOnlyAction,
   REWRITE_USERSCRIPT_ACTION,
   rewriteUserscriptActionSchema,
   RUN_USERSCRIPT_ACTION,
@@ -76,12 +77,9 @@ describe('rewrite_userscript validation and overlay store', () => {
     expect(result.reset).toBe(false);
     expect(result.scriptId).toBe(FIXTURE_SCRIPT_ID);
     expect(result.sourceHash).toMatch(/^[a-f0-9]{64}$/);
-    const overlay = (await storage.local.get('nano.userscript.overlays'))['nano.userscript.overlays'] as Record<
-      string,
-      UserscriptOverlay
-    >;
-    expect(overlay[FIXTURE_SCRIPT_ID]?.source).toBe(source);
-    expect(overlay[FIXTURE_SCRIPT_ID]?.sourceHash).toBe(result.sourceHash);
+    const stored = await getOverlayForScript(storage, FIXTURE_SCRIPT_ID);
+    expect(stored?.source).toBe(source);
+    expect(stored?.sourceHash).toBe(result.sourceHash);
   });
 
   it('rejects unknown id, empty, oversized, and dangerous source', async () => {
@@ -113,6 +111,8 @@ describe('rewrite_userscript validation and overlay store', () => {
     expect(() => validateOverlaySource(CHATGPT_ORGANIZE_SCRIPT_ID, validFixtureOverlaySource())).toThrow(
       /__nanoChatGptOrganize/,
     );
+    const hookOnly = `(() => { globalThis.__nanoOrganizeRun = true; globalThis.__nanoChatGptOrganize = { done: true }; })();`;
+    expect(() => validateOverlaySource(CHATGPT_ORGANIZE_SCRIPT_ID, hookOnly)).toThrow(/contract token/);
   });
 
   it('reset: true deletes the overlay so the packaged seed is used', async () => {
@@ -121,11 +121,8 @@ describe('rewrite_userscript validation and overlay store', () => {
     const reset = await rewriteUserscript(storage, { scriptId: FIXTURE_SCRIPT_ID, reset: true });
     expect(reset.reset).toBe(true);
     expect(reset.sourceHash).toBeNull();
-    const overlay = (await storage.local.get('nano.userscript.overlays'))['nano.userscript.overlays'] as Record<
-      string,
-      UserscriptOverlay
-    >;
-    expect(overlay[FIXTURE_SCRIPT_ID]).toBeUndefined();
+    await expect(getOverlayForScript(storage, FIXTURE_SCRIPT_ID)).resolves.toBeNull();
+    expect((await storage.local.get(overlayStorageKeyFor(FIXTURE_SCRIPT_ID)))[overlayStorageKeyFor(FIXTURE_SCRIPT_ID)]).toBeUndefined();
   });
 
   it('fails closed if a stored overlay record id does not match the lookup id', async () => {
@@ -146,6 +143,18 @@ describe('rewrite_userscript validation and overlay store', () => {
     const storage = createMemoryOverlayStorage();
     await rewriteUserscript(storage, { scriptId: FIXTURE_SCRIPT_ID, source: validFixtureOverlaySource() });
     await expect(getOverlayForScript(storage, CHATGPT_ORGANIZE_SCRIPT_ID)).resolves.toBeNull();
+  });
+
+  it('stores overlays for different ids without clobbering', async () => {
+    const storage = createMemoryOverlayStorage();
+    await Promise.all([
+      rewriteUserscript(storage, { scriptId: FIXTURE_SCRIPT_ID, source: validFixtureOverlaySource('a') }),
+      rewriteUserscript(storage, { scriptId: CHATGPT_ORGANIZE_SCRIPT_ID, source: validOrganizeOverlaySource() }),
+    ]);
+    const fixture = await getOverlayForScript(storage, FIXTURE_SCRIPT_ID);
+    const organize = await getOverlayForScript(storage, CHATGPT_ORGANIZE_SCRIPT_ID);
+    expect(fixture?.source).toContain('marker: "a"');
+    expect(organize?.source).toContain('__nanoChatGptOrganize');
   });
 });
 
@@ -173,7 +182,7 @@ describe('run_userscript overlay inject', () => {
       target: { tabId: 7 },
       world: 'MAIN',
       injectImmediately: true,
-      args: [source],
+      args: [source, []],
     });
     expect(typeof (calls[1] as { func: unknown }).func).toBe('function');
     expect((calls[1] as { func: typeof injectUserscriptSourceInPage }).func).toBe(injectUserscriptSourceInPage);
@@ -210,7 +219,7 @@ describe('run_userscript overlay inject', () => {
     const injected = await executeChatGptOrganizeOnce(api, 11, overlay);
     expect(injected.mode).toBe(OVERLAY_INJECT_MODE);
     expect(injected.js.some(file => file.includes(CHATGPT_ORGANIZE_FILE))).toBe(false);
-    expect(calls[1]).toMatchObject({ args: [source], world: 'MAIN' });
+    expect(calls[1]).toMatchObject({ args: [source, ['chatgpt.com']], world: 'MAIN' });
     expect(JSON.stringify(calls)).not.toContain(CHATGPT_ORGANIZE_FILE);
   });
 
@@ -228,6 +237,56 @@ describe('run_userscript overlay inject', () => {
     expect(() => assertChatGptOrganizeTabAllowed('https://example.com/')).toThrow(URLNotAllowedError);
     expect(() => assertChatGptOrganizeTabAllowed('https://chat.openai.com/c/abc')).toThrow(URLNotAllowedError);
   });
+
+  it('refuses overlay eval when the live page host is not in the allowed list', () => {
+    const previous = Object.getOwnPropertyDescriptor(globalThis, 'location');
+    Object.defineProperty(globalThis, 'location', {
+      configurable: true,
+      value: { href: 'https://example.com/evil' },
+    });
+    try {
+      expect(() => injectUserscriptSourceInPage(validFixtureOverlaySource(), ['chatgpt.com'])).toThrow(
+        /example.com is not allowed/,
+      );
+    } finally {
+      if (previous) {
+        Object.defineProperty(globalThis, 'location', previous);
+      } else {
+        delete (globalThis as { location?: unknown }).location;
+      }
+    }
+  });
+
+  it('does not re-evaluate overlay source if payload execute throws', async () => {
+    let sourceCalls = 0;
+    const calls: unknown[] = [];
+    const api: UserscriptChromeApi = {
+      userScripts: {
+        async register() {},
+        async unregister() {},
+      },
+      scripting: {
+        async registerContentScripts() {},
+        async unregisterContentScripts() {},
+        async executeScript(value) {
+          calls.push(value);
+          if ((value as { func?: unknown }).func) {
+            sourceCalls += 1;
+            throw new Error('payload threw after eval start');
+          }
+        },
+      },
+    };
+    const overlay: UserscriptOverlay = {
+      scriptId: FIXTURE_SCRIPT_ID,
+      source: validFixtureOverlaySource(),
+      rewrittenAt: Date.now(),
+      sourceHash: 'once',
+    };
+    await expect(injectReviewedOverlay(api, 4, overlay, FIXTURE_SCRIPT_ID)).rejects.toThrow(/payload threw/);
+    expect(sourceCalls).toBe(1);
+    expect(calls.filter(call => (call as { func?: unknown }).func)).toHaveLength(1);
+  });
 });
 
 describe('rewrite_userscript action schema and navigator prompt', () => {
@@ -242,6 +301,9 @@ describe('rewrite_userscript action schema and navigator prompt', () => {
     expect(parsed.script_id).toBe(CHATGPT_ORGANIZE_SCRIPT_ID);
     expect(rewriteUserscriptActionSchema.schema.parse({ script_id: FIXTURE_SCRIPT_ID, reset: true }).reset).toBe(true);
     expect(() => rewriteUserscriptActionSchema.schema.parse({ script_id: 'not-a-payload', source: 'x' })).toThrow();
+    expect(isUserscriptOnlyAction(RUN_USERSCRIPT_ACTION)).toBe(true);
+    expect(isUserscriptOnlyAction(REWRITE_USERSCRIPT_ACTION)).toBe(true);
+    expect(isUserscriptOnlyAction('click_element')).toBe(false);
     expect(rewriteUserscriptActionSchema.description).toMatch(/does not registerContentScripts/);
     expect(rewriteUserscriptActionSchema.description).toMatch(/Does not execute the source/);
     expect(runUserscriptActionSchema.description).toMatch(/overlay/);

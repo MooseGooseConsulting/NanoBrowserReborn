@@ -357,7 +357,7 @@ describe('chatgpt-organize action wait helpers', () => {
       files: [PACKAGED_MODE_FILE, COMPAT_FILE],
     });
     expect(calls.execute[1]).toMatchObject({
-      args: [overlaySource],
+      args: [overlaySource, ['chatgpt.com']],
       world: 'MAIN',
     });
     expect((calls.execute[1] as { func: unknown }).func).toBe(injectUserscriptSourceInPage);

@@ -1,7 +1,7 @@
 import { isReviewedUserscriptId, type ReviewedUserscriptId } from './catalog';
 
-/** chrome.storage.local key. Packaged public/userscripts/*.user.js files stay the reviewed seed. */
-export const OVERLAY_STORAGE_KEY = 'nano.userscript.overlays';
+/** Per-script chrome.storage.local key. Packaged public/userscripts/*.user.js files stay the reviewed seed. */
+export const OVERLAY_STORAGE_KEY_PREFIX = 'nano.userscript.overlay.';
 
 export type UserscriptOverlay = {
   scriptId: ReviewedUserscriptId;
@@ -15,10 +15,15 @@ export type OverlayMap = Partial<Record<ReviewedUserscriptId, UserscriptOverlay>
 export interface OverlayStorageArea {
   get: (keys: string | string[]) => Promise<Record<string, unknown>>;
   set: (items: Record<string, unknown>) => Promise<void>;
+  remove: (keys: string | string[]) => Promise<void>;
 }
 
 export interface OverlayStorageApi {
   local: OverlayStorageArea;
+}
+
+export function overlayStorageKeyFor(scriptId: string): string {
+  return `${OVERLAY_STORAGE_KEY_PREFIX}${scriptId}`;
 }
 
 export function chromeOverlayStorage(): OverlayStorageApi {
@@ -30,9 +35,10 @@ export function chromeOverlayStorage(): OverlayStorageApi {
 }
 
 export function createMemoryOverlayStorage(initial: OverlayMap = {}): OverlayStorageApi {
-  const data: Record<string, unknown> = {
-    [OVERLAY_STORAGE_KEY]: { ...initial },
-  };
+  const data: Record<string, unknown> = {};
+  for (const [scriptId, overlay] of Object.entries(initial)) {
+    data[overlayStorageKeyFor(scriptId)] = overlay;
+  }
   return {
     local: {
       async get(keys) {
@@ -48,17 +54,14 @@ export function createMemoryOverlayStorage(initial: OverlayMap = {}): OverlaySto
       async set(items) {
         Object.assign(data, items);
       },
+      async remove(keys) {
+        const list = Array.isArray(keys) ? keys : [keys];
+        for (const key of list) {
+          delete data[key];
+        }
+      },
     },
   };
-}
-
-export async function readOverlayMap(storage: OverlayStorageApi): Promise<OverlayMap> {
-  const got = await storage.local.get(OVERLAY_STORAGE_KEY);
-  const raw = got[OVERLAY_STORAGE_KEY];
-  if (!raw || typeof raw !== 'object') {
-    return {};
-  }
-  return raw as OverlayMap;
 }
 
 /**
@@ -72,8 +75,9 @@ export async function getOverlayForScript(
   if (!isReviewedUserscriptId(scriptId)) {
     throw new Error(`Unknown reviewed userscript id: ${scriptId}`);
   }
-  const map = await readOverlayMap(storage);
-  const overlay = map[scriptId];
+  const key = overlayStorageKeyFor(scriptId);
+  const got = await storage.local.get(key);
+  const overlay = got[key] as UserscriptOverlay | undefined;
   if (!overlay) {
     return null;
   }
@@ -94,15 +98,12 @@ export function assertOverlayMatchesScript(overlay: UserscriptOverlay, scriptId:
 
 export async function putOverlay(storage: OverlayStorageApi, overlay: UserscriptOverlay): Promise<void> {
   assertOverlayMatchesScript(overlay, overlay.scriptId);
-  const map = { ...(await readOverlayMap(storage)), [overlay.scriptId]: overlay };
-  await storage.local.set({ [OVERLAY_STORAGE_KEY]: map });
+  await storage.local.set({ [overlayStorageKeyFor(overlay.scriptId)]: overlay });
 }
 
 export async function deleteOverlay(storage: OverlayStorageApi, scriptId: string): Promise<void> {
   if (!isReviewedUserscriptId(scriptId)) {
     throw new Error(`Unknown reviewed userscript id: ${scriptId}`);
   }
-  const map = { ...(await readOverlayMap(storage)) };
-  delete map[scriptId];
-  await storage.local.set({ [OVERLAY_STORAGE_KEY]: map });
+  await storage.local.remove(overlayStorageKeyFor(scriptId));
 }

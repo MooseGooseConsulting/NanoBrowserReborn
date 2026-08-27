@@ -218,6 +218,12 @@ export const waitActionSchema: ActionSchema = {
 export const RUN_USERSCRIPT_ACTION = 'run_userscript';
 export const REWRITE_USERSCRIPT_ACTION = 'rewrite_userscript';
 
+export const USERSCRIPT_ONLY_ACTIONS = [RUN_USERSCRIPT_ACTION, REWRITE_USERSCRIPT_ACTION] as const;
+
+export function isUserscriptOnlyAction(name: string): boolean {
+  return (USERSCRIPT_ONLY_ACTIONS as readonly string[]).includes(name);
+}
+
 export const runUserscriptActionSchema: ActionSchema = {
   name: RUN_USERSCRIPT_ACTION,
   description:
