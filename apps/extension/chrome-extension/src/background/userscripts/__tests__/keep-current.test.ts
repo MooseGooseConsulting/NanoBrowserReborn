@@ -138,6 +138,55 @@ describe('keep-current ActionResult observation', () => {
     validateOverlaySource(CHATGPT_ORGANIZE_SCRIPT_ID, bytes);
   });
 
+  it('round-trips overlay bytes even when the source contains the end fence', async () => {
+    const overlaySource = `${packagedOrganizeSource()}\n-----END USERSCRIPT-----\n/* trap */`;
+    const storage = createMemoryOverlayStorage({
+      [CHATGPT_ORGANIZE_SCRIPT_ID]: {
+        scriptId: CHATGPT_ORGANIZE_SCRIPT_ID,
+        source: overlaySource,
+        rewrittenAt: Date.now(),
+        sourceHash: 'fence-hash',
+      },
+    });
+    const result = await buildKeepCurrentActionResult({
+      reason: 'chatgpt-organize timed out waiting for done',
+      scriptId: CHATGPT_ORGANIZE_SCRIPT_ID,
+      storage,
+      alreadyRewritten: false,
+    });
+    expect(extractKeepCurrentPayloadSource(result.extractedContent || '')).toBe(overlaySource);
+  });
+
+  it('uses the injected overlay snapshot, not a later storage rewrite', async () => {
+    const ranSource = `${packagedOrganizeSource()}\n/* ran */`;
+    const laterSource = `${packagedOrganizeSource()}\n/* later */`;
+    const storage = createMemoryOverlayStorage({
+      [CHATGPT_ORGANIZE_SCRIPT_ID]: {
+        scriptId: CHATGPT_ORGANIZE_SCRIPT_ID,
+        source: laterSource,
+        rewrittenAt: 2,
+        sourceHash: 'later',
+      },
+    });
+    const result = await buildKeepCurrentActionResult({
+      reason: 'chatgpt-organize timed out waiting for done',
+      scriptId: CHATGPT_ORGANIZE_SCRIPT_ID,
+      storage,
+      alreadyRewritten: false,
+      injected: {
+        kind: 'overlay',
+        overlay: {
+          scriptId: CHATGPT_ORGANIZE_SCRIPT_ID,
+          source: ranSource,
+          rewrittenAt: 1,
+          sourceHash: 'ran',
+        },
+      },
+    });
+    expect(extractKeepCurrentPayloadSource(result.extractedContent || '')).toBe(ranSource);
+    expect(result.extractedContent).not.toContain('/* later */');
+  });
+
   it('does not attach KEEP_CURRENT guidance for signed-out or 401', async () => {
     const seed = packagedOrganizeSource();
     setPackagedSeedLoaderForTests(async () => seed);
@@ -164,6 +213,7 @@ describe('keep-current ActionResult observation', () => {
       alreadyRewritten: true,
     });
     expect(result.error).toContain('already_retried');
+    expect(result.error).toContain('after rewrite_userscript this task');
     expect(result.error.includes('\n')).toBe(false);
     expect(result.extractedContent).toBeNull();
     expect(navigatorMemoryLastLine(result.error)).not.toMatch(/then run_userscript once/);
@@ -220,6 +270,7 @@ describe('keep-current navigator prompt and schemas', () => {
     expect(navigatorSystemPromptTemplate).toMatch(/already_retried/);
     expect(navigatorSystemPromptTemplate).toMatch(/same contract tokens/);
     expect(navigatorSystemPromptTemplate).toMatch(/run_userscript once/);
+    expect(navigatorSystemPromptTemplate).toMatch(/after rewrite succeeds/);
     expect(navigatorSystemPromptTemplate).toMatch(/Do not rewrite for signed-out, 401/);
     expect(runUserscriptActionSchema.description).toMatch(/KEEP_CURRENT/);
     expect(rewriteUserscriptActionSchema.description).toMatch(/KEEP_CURRENT/);

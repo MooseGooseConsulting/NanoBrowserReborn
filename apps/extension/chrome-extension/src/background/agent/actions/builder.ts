@@ -47,7 +47,7 @@ import {
   unregisterChatGptOrganize,
   waitForChatGptOrganizeDone,
 } from '@src/background/userscripts/organize-run';
-import { chromeOverlayStorage, type OverlayStorageApi } from '@src/background/userscripts/overlay';
+import { chromeOverlayStorage, type OverlayStorageApi, type UserscriptOverlay } from '@src/background/userscripts/overlay';
 import { injectReviewedOverlay, resolveRunSource, rewriteUserscript } from '@src/background/userscripts/rewrite';
 import { isReviewedUserscriptId } from '@src/background/userscripts/catalog';
 import { buildKeepCurrentActionResult } from '@src/background/userscripts/keep-current';
@@ -166,8 +166,6 @@ export function buildDynamicActionSchema(actions: Action[]): z.ZodType {
 export class ActionBuilder {
   private readonly context: AgentContext;
   private readonly extractorLLM: BaseChatModel;
-  /** Caps keep-current to rewrite-then-run once per script id per Navigator task. */
-  private readonly keepCurrentRewritten = new Set<string>();
 
   constructor(context: AgentContext, extractorLLM: BaseChatModel) {
     this.context = context;
@@ -733,6 +731,7 @@ export class ActionBuilder {
       this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_START, intent);
 
       let overlayStorage: OverlayStorageApi | null = null;
+      let ranOverlay: UserscriptOverlay | null = null;
       try {
         const page = await this.context.browserContext.getCurrentPage();
         let tabUrl = page.url();
@@ -748,7 +747,8 @@ export class ActionBuilder {
         const firewall = this.context.browserContext.getConfig();
         const api = chrome as UserscriptChromeApi;
         overlayStorage = chromeOverlayStorage();
-        const overlay = await resolveRunSource(overlayStorage, scriptId);
+        ranOverlay = await resolveRunSource(overlayStorage, scriptId);
+        const overlay = ranOverlay;
         const isOrganize = isChatGptOrganizeScript(scriptId);
         if (isOrganize) {
           assertChatGptOrganizeTabAllowed(tabUrl, firewall.allowedUrls, firewall.deniedUrls);
@@ -766,11 +766,13 @@ export class ActionBuilder {
                     reason: failure,
                     scriptId,
                     storage,
-                    alreadyRewritten: this.keepCurrentRewritten.has(scriptId),
+                    alreadyRewritten: this.context.keepCurrentRewrittenScriptIds.has(scriptId),
+                    injected: overlay
+                      ? { kind: 'overlay', overlay }
+                      : { kind: 'seed' },
                   }),
                 );
               }
-              this.keepCurrentRewritten.delete(scriptId);
               const successfulMutations = Array.isArray(state.mutations)
                 ? state.mutations.filter(item => item && item.ok !== false).length
                 : 0;
@@ -819,7 +821,8 @@ export class ActionBuilder {
               reason: msg,
               scriptId,
               storage: overlayStorage,
-              alreadyRewritten: this.keepCurrentRewritten.has(scriptId),
+              alreadyRewritten: this.context.keepCurrentRewrittenScriptIds.has(scriptId),
+              injected: ranOverlay ? { kind: 'overlay', overlay: ranOverlay } : { kind: 'seed' },
             }),
           );
         }
@@ -840,9 +843,9 @@ export class ActionBuilder {
           reset: input.reset,
         });
         if (result.reset) {
-          this.keepCurrentRewritten.delete(result.scriptId);
+          this.context.keepCurrentRewrittenScriptIds.delete(result.scriptId);
         } else {
-          this.keepCurrentRewritten.add(result.scriptId);
+          this.context.keepCurrentRewrittenScriptIds.add(result.scriptId);
         }
         const msg = result.reset
           ? t('act_rewriteUserscript_reset_ok', [result.scriptId])

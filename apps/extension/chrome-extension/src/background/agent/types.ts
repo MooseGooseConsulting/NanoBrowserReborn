@@ -49,6 +49,8 @@ export class AgentContext {
   stateMessageAdded: boolean;
   history: AgentStepHistory;
   finalAnswer: string | null;
+  /** Per-script keep-current rewrite cap for this Executor run. Cleared on follow-up tasks. */
+  keepCurrentRewrittenScriptIds: Set<string>;
 
   constructor(
     taskId: string,
@@ -73,6 +75,7 @@ export class AgentContext {
     this.stateMessageAdded = false;
     this.history = new AgentStepHistory();
     this.finalAnswer = null;
+    this.keepCurrentRewrittenScriptIds = new Set();
   }
 
   async emitEvent(actor: Actors, state: ExecutionState, eventDetails: string) {

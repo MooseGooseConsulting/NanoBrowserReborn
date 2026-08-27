@@ -1,5 +1,5 @@
 import { CHATGPT_ORGANIZE_SCRIPT_ID, isReviewedUserscriptId, payloadFileFor } from './catalog';
-import { getOverlayForScript, type OverlayStorageApi } from './overlay';
+import { getOverlayForScript, type OverlayStorageApi, type UserscriptOverlay } from './overlay';
 import { hashSource } from './rewrite';
 
 export type KeepCurrentActionResult = {
@@ -103,7 +103,7 @@ export function formatKeepCurrentErrorLine(input: {
   const reason = oneLine(input.reason);
   if (input.kind === 'already_retried') {
     return oneLine(
-      `${KEEP_CURRENT_ERROR_PREFIX} already_retried: ${reason} after a keep-current rewrite this task. Do not rewrite again.`,
+      `${KEEP_CURRENT_ERROR_PREFIX} already_retried: ${reason} after rewrite_userscript this task. Do not rewrite again.`,
     );
   }
   const sourceKind = input.sourceKind || 'unavailable';
@@ -124,12 +124,16 @@ export function formatKeepCurrentPayloadContent(payload: KeepCurrentPayload & { 
 /** Round-trip the fenced bytes Chrome would run (overlay source or packaged seed). */
 export function extractKeepCurrentPayloadSource(extractedContent: string): string {
   const beginAt = extractedContent.indexOf(USERSCRIPT_BEGIN);
-  const endNeedle = `\n${USERSCRIPT_END}`;
-  const endAt = extractedContent.indexOf(endNeedle);
-  if (beginAt < 0 || endAt < 0 || endAt <= beginAt) {
+  if (beginAt < 0) {
     throw new Error('KEEP_CURRENT_PAYLOAD missing userscript fences');
   }
-  return extractedContent.slice(beginAt + USERSCRIPT_BEGIN.length + 1, endAt);
+  const sourceStart = beginAt + USERSCRIPT_BEGIN.length + 1;
+  const endNeedle = `\n${USERSCRIPT_END}`;
+  const endAt = extractedContent.lastIndexOf(endNeedle);
+  if (endAt < sourceStart) {
+    throw new Error('KEEP_CURRENT_PAYLOAD missing userscript fences');
+  }
+  return extractedContent.slice(sourceStart, endAt);
 }
 
 export async function loadPackagedSeedSource(scriptId: string): Promise<string> {
@@ -173,6 +177,8 @@ export async function buildKeepCurrentActionResult(options: {
   scriptId?: string;
   storage: OverlayStorageApi;
   alreadyRewritten: boolean;
+  /** Overlay/seed snapshot actually injected this run. Omit in tests to load from storage. */
+  injected?: { kind: 'overlay'; overlay: UserscriptOverlay } | { kind: 'seed' };
 }): Promise<KeepCurrentActionResult> {
   const scriptId = options.scriptId || CHATGPT_ORGANIZE_SCRIPT_ID;
   const classified = classifyOrganizeKeepCurrentFailure(options.reason);
@@ -188,7 +194,18 @@ export async function buildKeepCurrentActionResult(options: {
   }
   let payload: KeepCurrentPayload | null = null;
   try {
-    payload = await loadCurrentKeepCurrentPayload(options.storage, scriptId);
+    if (options.injected?.kind === 'overlay') {
+      payload = {
+        source: options.injected.overlay.source,
+        kind: 'overlay',
+        sourceHash: options.injected.overlay.sourceHash,
+      };
+    } else if (options.injected?.kind === 'seed') {
+      const source = await loadPackagedSeedSource(scriptId);
+      payload = { source, kind: 'seed', sourceHash: await hashSource(source) };
+    } else {
+      payload = await loadCurrentKeepCurrentPayload(options.storage, scriptId);
+    }
   } catch {
     payload = null;
   }
