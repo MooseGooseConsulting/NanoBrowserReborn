@@ -31,6 +31,16 @@ import type { BaseChatModel } from '@langchain/core/language_models/chat_models'
 import { wrapUntrustedContent } from '../messages/utils';
 import { URLNotAllowedError } from '@src/background/browser/views';
 import { registerAndRunReviewedUserscript, type UserscriptChromeApi } from '@src/background/userscripts/register';
+import {
+  armChatGptOrganizeRun,
+  assertChatGptOrganizeTabAllowed,
+  executeChatGptOrganizeOnce,
+  isChatGptOrganizeScript,
+  organizeActionFailure,
+  runExclusiveChatGptOrganize,
+  unregisterChatGptOrganize,
+  waitForChatGptOrganizeDone,
+} from '@src/background/userscripts/organize-run';
 
 const logger = createLogger('Action');
 
@@ -723,7 +733,33 @@ export class ActionBuilder {
         }
 
         const firewall = this.context.browserContext.getConfig();
-        const result = await registerAndRunReviewedUserscript(chrome as UserscriptChromeApi, {
+        const api = chrome as UserscriptChromeApi;
+        const isOrganize = isChatGptOrganizeScript(scriptId);
+        if (isOrganize) {
+          assertChatGptOrganizeTabAllowed(tabUrl, firewall.allowedUrls, firewall.deniedUrls);
+          return await runExclusiveChatGptOrganize(page.tabId, async () => {
+            await armChatGptOrganizeRun(api, page.tabId);
+            try {
+              const injected = await executeChatGptOrganizeOnce(api, page.tabId);
+              const state = await waitForChatGptOrganizeDone(api, page.tabId);
+              const failure = organizeActionFailure(state);
+              if (failure) {
+                this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_FAIL, failure);
+                return new ActionResult({ error: failure, includeInMemory: true });
+              }
+              const successfulMutations = Array.isArray(state.mutations)
+                ? state.mutations.filter(item => item && item.ok !== false).length
+                : 0;
+              const msg = `${t('act_runUserscript_ok', [scriptId, injected.mode])} listed ${state.listed ?? 0} · mutations ${successfulMutations}`;
+              this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);
+              return new ActionResult({ extractedContent: msg, includeInMemory: true });
+            } finally {
+              await unregisterChatGptOrganize(api);
+            }
+          });
+        }
+
+        const result = await registerAndRunReviewedUserscript(api, {
           scriptId,
           tabId: page.tabId,
           tabUrl,

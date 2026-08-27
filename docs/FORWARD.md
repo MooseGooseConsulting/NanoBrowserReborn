@@ -8,39 +8,30 @@ This file is the **only** forward map. There is no older work order. Do **not** 
 
 Set-of-marks is **optional**. Do not rebuild `buildDomTree` / `highlightIndex`. Do not invent a new repo. Spec Kit is not the process. `drop/` is historical. `vendor/` is frozen. Work in `apps/extension` (and later `apps/stagehand-host`).
 
-Do **not** implement items 2–4 in the current PR. Do **not** open a second PR for them from this branch.
+Do **not** implement items 3–4 in the current PR. Do **not** open a second PR for them from this branch.
 
 ## The only plan
 
-1. **This PR** — `run_userscript` runner + fixture payload. Merge after review comments are clean.
-2. **Next PR** — ChatGPT organize payload on that runner. Same-origin fetch. A real job. Not `click_element`.
-3. **Then** — payload rewrite / keep-current, several times a day.
+1. **On main** — `run_userscript` runner + fixture payload. Squash-merged as #2 (`bdbd77c`). Not open.
+2. **This PR** — ChatGPT organize payload on that runner. Same-origin fetch. A real job. Not `click_element`.
+3. **Next PR after merge** — payload rewrite / keep-current, several times a day.
 4. **Later, not this week** — Hyperagent observe; Stagehand host after a real CDP 5-step; four-state completion; MCP/REST; LangGraph; marks/SAM.
 
-## This PR (item 1)
+## This PR (item 2)
 
-Executor action `run_userscript` registers and runs a **reviewed** fixture banner/counter. That is the working payload.
+Reviewed payload `chatgpt-organize` **organizes** scrap ChatGPT chats via same-origin `fetch` (session cookie → `/api/auth/session` → conversation JSON → PATCH title). Not a catalog-id stub. Not `click_element`. Not a new runner.
 
-- Packaged `chrome.scripting.registerContentScripts` first (MAIN, `document_end`, `persistAcrossSessions: false`).
-- Fall back to `chrome.userScripts.register` only when packaged **registration** itself fails.
-- Immediate run always `chrome.scripting.executeScript`. `chrome.userScripts.execute` is unused.
-- File lists are keyed by `scriptId` (`filesForMode(mode, scriptId)`). There is no module-global payload.
-- Matches: current-tab origin only, portless. No `http(s)://*/*` fallback. No model `*://*/*`.
-- Helper asserts the payload's allowed origin (`chatgpt-organize` → `chatgpt.com`). Not builder-only.
-- `clearRegistrations` drops every reviewed id, not only the one about to run.
-- BrowserContext allow/deny lists apply to the tab URL and to matches.
-- If packaged register succeeds and `runOnTab` fails: unregister and throw. Same cleanup on the userScripts path.
-- Navigator `script_id` is the reviewed-id enum. `chatgpt-organize` is a catalog hook (stub file) so the runner cannot ship fixture for that id. Organize/fetch body is the next PR.
+- Origin lock: `chatgpt.com` only. `chat.openai.com` 308s to chatgpt.com and does not serve `/backend-api`; www hosts are also omitted. Encoded in `REVIEWED_USERSCRIPT_HOSTS` (catalog) so `register.ts` stays untouched.
+- File lists stay keyed by `scriptId` (`filesForMode(mode, scriptId)` from PR #2). There is no module-global payload selector. The organize builder path fail-closes if the selected id and the files about to be injected disagree.
+- One-shot **executeScript only** for `chatgpt-organize` (does not `registerContentScripts`). Builder sets `__nanoOrganizeRun` in MAIN, injects, **waits for `__nanoChatGptOrganize.done`**, then unregisters leftover organize ids. Sticky content-script reruns skip. Signed-out / 401 is an **action error**. `register.ts` is not edited in this PR (`persistAcrossSessions: false` already comes from #2).
+- Background serializes organize **per tabId**. A second overlapping organize on the same tab fails closed immediately and does not re-arm or abort the in-flight run.
+- Title only. Never archive on missing JSON, empty preview, or short chats (`titleFromPreview` requires 8+ characters).
+- Fixture remains inject-proof.
+- BrowserContext allow/deny lists still apply. Matches stay origin-only.
 
-Do **not** start Hyperagent, Stagehand, four-state completion, MCP/REST, LangGraph, or marks in this PR.
+Do **not** start rewrite/keep-current, Hyperagent, Stagehand, four-state completion, MCP/REST, LangGraph, or marks in this PR.
 
-## Next PR (item 2)
-
-ChatGPT organize on the same helper. Same-origin `fetch` against chatgpt.com APIs. Not `click_element`. Not a new runner.
-
-Unproven until a **logged-in `chatgpt.com` tab**. Mocked unit tests are not that proof.
-
-## Then (item 3)
+## Next PR (item 3)
 
 Rewrite / keep-current the payloads as ChatGPT's DOM and APIs drift. Several times a day is the expected cadence, not a later project.
 
@@ -61,17 +52,17 @@ No host code until that CDP 5-step has been run once. Do not start with MarkMap,
 
 **Mocked unit tests are not enough.**
 
-**Human gate for this PR:** load unpacked `dist`, open a real http(s) tab, run the fixture, **see the banner on that tab**. Characterization still holds: Navigator is required to start a task; the side panel must not say ready without Navigator (`drop/handoff/CODE_CONFIGURATION_FINDINGS.md`).
+**Human gate for this PR:** run `chatgpt-organize` on a **logged-in `chatgpt.com` tab** and see titles change (or a signed-out action error). Characterization still holds: Navigator is required to start a task; the side panel must not say ready without Navigator (`drop/handoff/CODE_CONFIGURATION_FINDINGS.md`).
 
-**ChatGPT organize is unproven** until it has been run on a logged-in `chatgpt.com` tab. That is the next PR's gate, not this one's.
+**ChatGPT organize is unproven** until that logged-in tab run. Mocked fetch in vitest is necessary, not sufficient. No ChatGPT login in CI.
 
-Automated coverage for the runner (necessary, not sufficient):
+Automated coverage (necessary, not sufficient):
 
 ```text
 pnpm -F chrome-extension test
 ```
 
-Must cover packaged `registerContentScripts` first, `chrome.userScripts` fallback only after registration failure, origin-only matches (no model `*://*/*`, no all-sites fallback, portless patterns), MAIN world, `document_end`, and injection-safety URL blocks. No ChatGPT login in this PR. Navigator prompt must not claim ChatGPT organize/export is a registered payload.
+Must cover catalog id + origin gate, injected `.user.js` mocked fetch (`Authorization: Bearer`, `Oai-Device-Id`, `Chatgpt-Account-Id`, title PATCH, no archive), and wait-for-done / signed-out action error. Fixture inject-proof stays.
 
 From `apps/extension` after `corepack pnpm install`, still run:
 
