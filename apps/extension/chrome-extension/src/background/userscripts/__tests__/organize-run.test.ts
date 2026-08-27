@@ -1,0 +1,105 @@
+import { afterEach, describe, expect, it } from 'vitest';
+import {
+  CHATGPT_ORGANIZE_SCRIPT_ID,
+  contentScriptIdFor,
+  userScriptIdFor,
+} from '../catalog';
+import type { UserscriptChromeApi } from '../register';
+import {
+  armChatGptOrganizeRun,
+  armOrganizeRunInPage,
+  isChatGptOrganizeScript,
+  organizeActionFailure,
+  unregisterChatGptOrganize,
+  waitForChatGptOrganizeDone,
+  waitForOrganizeDoneInPage,
+} from '../organize-run';
+
+describe('chatgpt-organize action wait helpers', () => {
+  afterEach(() => {
+    delete (globalThis as { __nanoOrganizeRun?: boolean }).__nanoOrganizeRun;
+    delete (globalThis as { __nanoChatGptOrganize?: unknown }).__nanoChatGptOrganize;
+  });
+
+  it('arms the one-shot flag in-page', () => {
+    expect(isChatGptOrganizeScript(CHATGPT_ORGANIZE_SCRIPT_ID)).toBe(true);
+    expect(isChatGptOrganizeScript('fixture')).toBe(false);
+    armOrganizeRunInPage();
+    expect((globalThis as { __nanoOrganizeRun?: boolean }).__nanoOrganizeRun).toBe(true);
+  });
+
+  it('waitForOrganizeDoneInPage resolves only after done is set', async () => {
+    setTimeout(() => {
+      (globalThis as { __nanoChatGptOrganize?: { done: boolean; signedIn: boolean } }).__nanoChatGptOrganize = {
+        done: true,
+        signedIn: true,
+      };
+    }, 20);
+    const state = await waitForOrganizeDoneInPage(500);
+    expect(state.done).toBe(true);
+    expect(state.signedIn).toBe(true);
+  });
+
+  it('waitForOrganizeDoneInPage throws on timeout', async () => {
+    await expect(waitForOrganizeDoneInPage(30)).rejects.toThrow(/timed out waiting for done/);
+  });
+
+  it('treats signed-out, 401, and missing state as action errors', () => {
+    expect(organizeActionFailure(undefined)).toMatch(/did not report/);
+    expect(organizeActionFailure({ done: false })).toMatch(/did not finish/);
+    expect(organizeActionFailure({ done: true, signedIn: false, error: 'Not signed in. This payload has no login UI.' })).toBe(
+      'Not signed in. This payload has no login UI.',
+    );
+    expect(organizeActionFailure({ done: true, signedIn: false, error: 'session failed: 401 Unauthorized' })).toBe(
+      'session failed: 401 Unauthorized',
+    );
+    expect(organizeActionFailure({ done: true, signedIn: true, error: null })).toBeNull();
+  });
+
+  it('armChatGptOrganizeRun and waitForChatGptOrganizeDone use MAIN-world executeScript', async () => {
+    const calls: unknown[] = [];
+    const api: UserscriptChromeApi = {
+      scripting: {
+        async registerContentScripts() {},
+        async unregisterContentScripts() {},
+        async executeScript(injection) {
+          calls.push(injection);
+          return [{ result: { done: true, signedIn: true, error: null, listed: 2, mutations: [] } }];
+        },
+      },
+    };
+    await armChatGptOrganizeRun(api, 9);
+    const state = await waitForChatGptOrganizeDone(api, 9, 1000);
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toMatchObject({ target: { tabId: 9 }, world: 'MAIN', injectImmediately: true });
+    expect(typeof (calls[0] as { func: unknown }).func).toBe('function');
+    expect(calls[1]).toMatchObject({ target: { tabId: 9 }, world: 'MAIN', args: [1000] });
+    expect(state.signedIn).toBe(true);
+  });
+
+  it('unregisters only chatgpt-organize ids after the one-shot', async () => {
+    const unregisters: unknown[] = [];
+    const api: UserscriptChromeApi = {
+      userScripts: {
+        async register() {},
+        async unregister(filter) {
+          unregisters.push(['user', filter]);
+        },
+      },
+      scripting: {
+        async registerContentScripts() {},
+        async unregisterContentScripts(filter) {
+          unregisters.push(['content', filter]);
+        },
+        async executeScript() {
+          return [];
+        },
+      },
+    };
+    await unregisterChatGptOrganize(api);
+    expect(unregisters).toEqual([
+      ['user', { ids: [userScriptIdFor(CHATGPT_ORGANIZE_SCRIPT_ID)] }],
+      ['content', { ids: [contentScriptIdFor(CHATGPT_ORGANIZE_SCRIPT_ID)] }],
+    ]);
+  });
+});
