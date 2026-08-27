@@ -9,6 +9,7 @@
     'chat.openai.com': true,
   };
   const LIST_LIMIT = 100;
+  const LIST_PAGE_CAP = 3;
   const SCRAP_JSON_CAP = 8;
   const RENAME_CAP = 8;
   const DELAY_MS = 350;
@@ -67,17 +68,49 @@
     return proposed;
   }
 
+  function decodeCookieValue(raw) {
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw;
+    }
+  }
+
   function deviceId() {
     const cookie = document.cookie.match(/(?:^|;)\s*oai-did=([^;]+)/);
-    if (cookie) return decodeURIComponent(cookie[1]);
+    if (cookie) return decodeCookieValue(cookie[1]);
     return '';
   }
 
   function accountId(session) {
     const cookie = document.cookie.match(/(?:^|;)\s*_account=([^;]+)/);
-    if (cookie) return decodeURIComponent(cookie[1]);
+    if (cookie) return decodeCookieValue(cookie[1]);
     if (session && typeof session.accountId === 'string' && session.accountId) return session.accountId;
     return '';
+  }
+
+  function organizeCancelled() {
+    if (globalThis.__nanoOrganizeCancelled) return true;
+    if (typeof globalThis.__nanoOrganizeDeadline === 'number' && Date.now() > globalThis.__nanoOrganizeDeadline) {
+      globalThis.__nanoOrganizeCancelled = true;
+      try {
+        if (globalThis.__nanoOrganizeAbort) globalThis.__nanoOrganizeAbort.abort();
+      } catch {
+        // already aborted
+      }
+      return true;
+    }
+    return false;
+  }
+
+  function organizeSignal() {
+    return globalThis.__nanoOrganizeAbort ? globalThis.__nanoOrganizeAbort.signal : undefined;
+  }
+
+  function throwIfCancelled() {
+    if (organizeCancelled()) {
+      throw new Error('chatgpt-organize timed out');
+    }
   }
 
   function backendUrl(path) {
@@ -92,14 +125,17 @@
   }
 
   async function fetchSession() {
+    throwIfCancelled();
     const response = await fetch(`${location.origin}/api/auth/session`, {
       credentials: 'include',
       headers: { Accept: 'application/json' },
+      signal: organizeSignal(),
     });
     return readJson(response, 'session');
   }
 
   async function fetchBackend(path, accessToken, options = {}) {
+    throwIfCancelled();
     const headers = {
       Accept: 'application/json',
       Authorization: `Bearer ${accessToken}`,
@@ -115,6 +151,7 @@
       credentials: 'include',
       headers,
       body: options.body ? JSON.stringify(options.body) : undefined,
+      signal: organizeSignal(),
     });
     return readJson(response, path);
   }
@@ -190,9 +227,9 @@
       origin: result.origin,
       signedIn: result.signedIn,
       listed: result.listed,
-      scrap: result.scrap,
+      scrapCount: result.scrap.length,
       namedCount: result.named.length,
-      mutations: result.mutations,
+      mutationIds: result.mutations.map(item => item.id),
       currentId: result.current && result.current.id,
       error: result.error,
     });
@@ -231,10 +268,18 @@
     const workspaceId = accountId(session);
 
     paint('Nano Reborn ChatGPT organize: listing conversations…');
-    const page = await fetchBackend(`/conversations?offset=0&limit=${LIST_LIMIT}`, accessToken, {
-      accountId: workspaceId,
-    });
-    const items = Array.isArray(page && page.items) ? page.items : [];
+    const items = [];
+    for (let pageIndex = 0; pageIndex < LIST_PAGE_CAP; pageIndex += 1) {
+      throwIfCancelled();
+      if (pageIndex > 0) await sleep(DELAY_MS);
+      const offset = pageIndex * LIST_LIMIT;
+      const page = await fetchBackend(`/conversations?offset=${offset}&limit=${LIST_LIMIT}`, accessToken, {
+        accountId: workspaceId,
+      });
+      const batch = Array.isArray(page && page.items) ? page.items : [];
+      items.push(...batch);
+      if (batch.length < LIST_LIMIT) break;
+    }
     result.listed = items.length;
 
     const currentId = chatIdFromUrl();
@@ -258,6 +303,7 @@
 
     const jsonById = {};
     for (let i = 0; i < fetchQueue.length; i += 1) {
+      throwIfCancelled();
       if (i > 0) await sleep(DELAY_MS);
       const item = fetchQueue[i];
       try {
@@ -272,6 +318,7 @@
     const mutationById = {};
     // Title-only. Skip unfetched / failed JSON / empty-or-short preview. Never archive.
     for (const item of scrapItems) {
+      throwIfCancelled();
       const raw = jsonById[item.id];
       if (!raw || raw.error) continue;
       const preview = firstUserPreview(raw);
@@ -279,6 +326,7 @@
       if (!proposed) continue;
       if (renameCount >= RENAME_CAP) break;
       await sleep(DELAY_MS);
+      throwIfCancelled();
       try {
         await fetchBackend(`/conversation/${item.id}`, accessToken, {
           method: 'PATCH',
@@ -301,6 +349,12 @@
         result.mutations.push(mutation);
         mutationById[item.id] = mutation;
       }
+    }
+
+    const failedRenames = result.mutations.filter(item => !item.ok);
+    if (failedRenames.length && !result.error) {
+      result.error =
+        failedRenames[0].error || `chatgpt-organize rename failed for ${failedRenames.length} chat(s)`;
     }
 
     result.scrap = scrapItems.map(item => {

@@ -1,10 +1,11 @@
 import { createLogger } from '@src/background/log';
+import { URLNotAllowedError } from '@src/background/browser/views';
 import {
   CHATGPT_ORGANIZE_SCRIPT_ID,
   contentScriptIdFor,
   userScriptIdFor,
 } from './catalog';
-import { WORLD, type UserscriptChromeApi } from './register';
+import { assertUserscriptOrigin, isInjectableHttpUrl, WORLD, type UserscriptChromeApi } from './register';
 
 const logger = createLogger('Userscripts');
 
@@ -15,12 +16,27 @@ const logger = createLogger('Userscripts');
  */
 export const ORGANIZE_DONE_TIMEOUT_MS = 60_000;
 
+export type ChatGptOrganizeMutation = {
+  ok?: boolean;
+  error?: string;
+  id?: string;
+  action?: string;
+};
+
 export type ChatGptOrganizePageState = {
   done?: boolean;
   signedIn?: boolean;
   error?: string | null;
   listed?: number;
-  mutations?: unknown[];
+  mutations?: ChatGptOrganizeMutation[];
+};
+
+type OrganizePageGlobals = {
+  __nanoOrganizeRun?: boolean;
+  __nanoChatGptOrganize?: ChatGptOrganizePageState;
+  __nanoOrganizeDeadline?: number;
+  __nanoOrganizeCancelled?: boolean;
+  __nanoOrganizeAbort?: AbortController;
 };
 
 type InjectionResult = { result?: ChatGptOrganizePageState };
@@ -29,26 +45,55 @@ export function isChatGptOrganizeScript(scriptId: string): boolean {
   return scriptId === CHATGPT_ORGANIZE_SCRIPT_ID;
 }
 
+/** Origin / firewall gate before any MAIN-world inject. Does not edit register.ts. */
+export function assertChatGptOrganizeTabAllowed(
+  tabUrl: string,
+  allowList: string[] = [],
+  denyList: string[] = [],
+): void {
+  if (!isInjectableHttpUrl(tabUrl, allowList, denyList)) {
+    throw new URLNotAllowedError(`URL: ${tabUrl} is not allowed`);
+  }
+  assertUserscriptOrigin(CHATGPT_ORGANIZE_SCRIPT_ID, tabUrl);
+}
+
 /** Serialized into the tab MAIN world. Do not close over module locals. */
-export function armOrganizeRunInPage(): void {
-  const g = globalThis as {
-    __nanoOrganizeRun?: boolean;
-    __nanoChatGptOrganize?: ChatGptOrganizePageState;
-  };
+export function cancelOrganizeRunInPage(): void {
+  const g = globalThis as OrganizePageGlobals;
+  g.__nanoOrganizeCancelled = true;
+  try {
+    g.__nanoOrganizeAbort?.abort();
+  } catch {
+    // already aborted
+  }
+}
+
+/** Serialized into the tab MAIN world. Do not close over module locals. */
+export function armOrganizeRunInPage(timeoutMs: number): void {
+  const g = globalThis as OrganizePageGlobals;
   g.__nanoOrganizeRun = true;
   delete g.__nanoChatGptOrganize;
+  g.__nanoOrganizeCancelled = false;
+  g.__nanoOrganizeDeadline = Date.now() + timeoutMs;
+  try {
+    g.__nanoOrganizeAbort?.abort();
+  } catch {
+    // previous controller already aborted
+  }
+  g.__nanoOrganizeAbort = new AbortController();
 }
 
 /** Serialized into the tab MAIN world. Chrome awaits this Promise. */
 export async function waitForOrganizeDoneInPage(timeoutMs: number): Promise<ChatGptOrganizePageState> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const state = (globalThis as { __nanoChatGptOrganize?: ChatGptOrganizePageState }).__nanoChatGptOrganize;
+    const state = (globalThis as OrganizePageGlobals).__nanoChatGptOrganize;
     if (state && state.done) {
       return state;
     }
     await new Promise(resolve => setTimeout(resolve, 50));
   }
+  cancelOrganizeRunInPage();
   throw new Error('chatgpt-organize timed out waiting for done');
 }
 
@@ -62,17 +107,26 @@ export function organizeActionFailure(state: ChatGptOrganizePageState | null | u
   if (state.error) {
     return String(state.error);
   }
+  const failed = (state.mutations || []).filter(item => item && item.ok === false);
+  if (failed.length) {
+    return String(failed[0].error || `chatgpt-organize rename failed for ${failed.length} chat(s)`);
+  }
   if (!state.signedIn) {
     return 'Not signed in. This payload has no login UI.';
   }
   return null;
 }
 
-export async function armChatGptOrganizeRun(api: UserscriptChromeApi, tabId: number): Promise<void> {
+export async function armChatGptOrganizeRun(
+  api: UserscriptChromeApi,
+  tabId: number,
+  timeoutMs = ORGANIZE_DONE_TIMEOUT_MS,
+): Promise<void> {
   await api.scripting.executeScript({
     target: { tabId },
     world: WORLD,
     injectImmediately: true,
+    args: [timeoutMs],
     func: armOrganizeRunInPage,
   });
 }

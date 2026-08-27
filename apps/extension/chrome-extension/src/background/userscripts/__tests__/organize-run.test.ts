@@ -4,11 +4,15 @@ import {
   contentScriptIdFor,
   userScriptIdFor,
 } from '../catalog';
+import { URLNotAllowedError } from '@src/background/browser/views';
 import type { UserscriptChromeApi } from '../register';
 import {
   armChatGptOrganizeRun,
   armOrganizeRunInPage,
+  assertChatGptOrganizeTabAllowed,
+  cancelOrganizeRunInPage,
   isChatGptOrganizeScript,
+  ORGANIZE_DONE_TIMEOUT_MS,
   organizeActionFailure,
   unregisterChatGptOrganize,
   waitForChatGptOrganizeDone,
@@ -17,15 +21,27 @@ import {
 
 describe('chatgpt-organize action wait helpers', () => {
   afterEach(() => {
+    cancelOrganizeRunInPage();
     delete (globalThis as { __nanoOrganizeRun?: boolean }).__nanoOrganizeRun;
     delete (globalThis as { __nanoChatGptOrganize?: unknown }).__nanoChatGptOrganize;
+    delete (globalThis as { __nanoOrganizeDeadline?: number }).__nanoOrganizeDeadline;
+    delete (globalThis as { __nanoOrganizeCancelled?: boolean }).__nanoOrganizeCancelled;
+    delete (globalThis as { __nanoOrganizeAbort?: AbortController }).__nanoOrganizeAbort;
   });
 
   it('arms the one-shot flag in-page', () => {
     expect(isChatGptOrganizeScript(CHATGPT_ORGANIZE_SCRIPT_ID)).toBe(true);
     expect(isChatGptOrganizeScript('fixture')).toBe(false);
-    armOrganizeRunInPage();
+    armOrganizeRunInPage(ORGANIZE_DONE_TIMEOUT_MS);
     expect((globalThis as { __nanoOrganizeRun?: boolean }).__nanoOrganizeRun).toBe(true);
+    expect((globalThis as { __nanoOrganizeAbort?: AbortController }).__nanoOrganizeAbort).toBeInstanceOf(AbortController);
+  });
+
+  it('rejects disallowed tabs before any MAIN-world arm inject', () => {
+    expect(() => assertChatGptOrganizeTabAllowed('https://chatgpt.com/c/abc')).not.toThrow();
+    expect(() => assertChatGptOrganizeTabAllowed('https://example.com/')).toThrow(URLNotAllowedError);
+    expect(() => assertChatGptOrganizeTabAllowed('chrome://extensions')).toThrow(URLNotAllowedError);
+    expect(() => assertChatGptOrganizeTabAllowed('https://www.chatgpt.com/')).toThrow(URLNotAllowedError);
   });
 
   it('arm-then-wait does not resolve from a stale prior done: true', async () => {
@@ -36,7 +52,7 @@ describe('chatgpt-organize action wait helpers', () => {
       signedIn: true,
       listed: 99,
     };
-    armOrganizeRunInPage();
+    armOrganizeRunInPage(ORGANIZE_DONE_TIMEOUT_MS);
     expect((globalThis as { __nanoOrganizeRun?: boolean }).__nanoOrganizeRun).toBe(true);
     expect((globalThis as { __nanoChatGptOrganize?: unknown }).__nanoChatGptOrganize).toBeUndefined();
 
@@ -68,9 +84,10 @@ describe('chatgpt-organize action wait helpers', () => {
 
   it('waitForOrganizeDoneInPage throws on timeout', async () => {
     await expect(waitForOrganizeDoneInPage(30)).rejects.toThrow(/timed out waiting for done/);
+    expect((globalThis as { __nanoOrganizeCancelled?: boolean }).__nanoOrganizeCancelled).toBe(true);
   });
 
-  it('treats signed-out, 401, and missing state as action errors', () => {
+  it('treats signed-out, 401, failed PATCH, and missing state as action errors', () => {
     expect(organizeActionFailure(undefined)).toMatch(/did not report/);
     expect(organizeActionFailure({ done: false })).toMatch(/did not finish/);
     expect(organizeActionFailure({ done: true, signedIn: false, error: 'Not signed in. This payload has no login UI.' })).toBe(
@@ -79,7 +96,15 @@ describe('chatgpt-organize action wait helpers', () => {
     expect(organizeActionFailure({ done: true, signedIn: false, error: 'session failed: 401 Unauthorized' })).toBe(
       'session failed: 401 Unauthorized',
     );
-    expect(organizeActionFailure({ done: true, signedIn: true, error: null })).toBeNull();
+    expect(
+      organizeActionFailure({
+        done: true,
+        signedIn: true,
+        error: null,
+        mutations: [{ id: 'scrap-rename', action: 'rename', ok: false, error: 'PATCH failed: 401 Unauthorized' }],
+      }),
+    ).toBe('PATCH failed: 401 Unauthorized');
+    expect(organizeActionFailure({ done: true, signedIn: true, error: null, mutations: [{ ok: true }] })).toBeNull();
   });
 
   it('armChatGptOrganizeRun and waitForChatGptOrganizeDone use MAIN-world executeScript', async () => {
@@ -97,7 +122,7 @@ describe('chatgpt-organize action wait helpers', () => {
     await armChatGptOrganizeRun(api, 9);
     const state = await waitForChatGptOrganizeDone(api, 9, 1000);
     expect(calls).toHaveLength(2);
-    expect(calls[0]).toMatchObject({ target: { tabId: 9 }, world: 'MAIN', injectImmediately: true });
+    expect(calls[0]).toMatchObject({ target: { tabId: 9 }, world: 'MAIN', injectImmediately: true, args: [ORGANIZE_DONE_TIMEOUT_MS] });
     expect(typeof (calls[0] as { func: unknown }).func).toBe('function');
     expect(calls[1]).toMatchObject({ target: { tabId: 9 }, world: 'MAIN', args: [1000] });
     expect(state.signedIn).toBe(true);

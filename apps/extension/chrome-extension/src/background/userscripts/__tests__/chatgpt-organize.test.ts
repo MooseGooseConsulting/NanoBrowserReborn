@@ -94,6 +94,7 @@ async function runInjectedPayload(options) {
       gm[key] = value;
     },
     crypto: { randomUUID: () => '11111111-1111-4111-8111-111111111111' },
+    AbortController,
     setTimeout,
     clearTimeout,
     Promise,
@@ -115,6 +116,12 @@ async function runInjectedPayload(options) {
   if (options.oneShot !== false) {
     context.__nanoOrganizeRun = true;
   }
+  if (options.deadlineExpired) {
+    context.__nanoOrganizeDeadline = Date.now() - 1;
+    context.__nanoOrganizeCancelled = true;
+    context.__nanoOrganizeAbort = new AbortController();
+    context.__nanoOrganizeAbort.abort();
+  }
   vm.runInNewContext(payloadSource(), context, { timeout: 5000 });
   const started = Date.now();
   while (Date.now() - started < 20000) {
@@ -123,7 +130,7 @@ async function runInjectedPayload(options) {
     }
     await new Promise(resolve => setTimeout(resolve, 10));
   }
-  return { result: context.__nanoChatGptOrganize, calls, banner: created };
+  return { result: context.__nanoChatGptOrganize, calls, banner: created, gm };
 }
 
 describe('chatgpt-organize injected payload (mocked fetch)', () => {
@@ -197,6 +204,18 @@ describe('chatgpt-organize injected payload (mocked fetch)', () => {
     expect(calls).toEqual([]);
   });
 
+  it('does not PATCH after the organize deadline is cancelled', async () => {
+    const { result, calls } = await runInjectedPayload({
+      deadlineExpired: true,
+      fetchImpl: async () => {
+        throw new Error('fetch should not run after cancel');
+      },
+    });
+    expect(result.done).toBe(true);
+    expect(result.error).toMatch(/timed out/);
+    expect(calls.filter(call => call.method === 'PATCH')).toEqual([]);
+  });
+
   it('sends Bearer without inventing Oai-Device-Id when oai-did is missing', async () => {
     const { result, calls } = await runInjectedPayload({
       cookie: '_account=acct-99',
@@ -222,6 +241,66 @@ describe('chatgpt-organize injected payload (mocked fetch)', () => {
       expect(call.headers['Chatgpt-Account-Id']).toBe('acct-99');
     }
     expect(calls.some(call => call.headers['Oai-Device-Id'] === '11111111-1111-4111-8111-111111111111')).toBe(false);
+  });
+
+  it('does not invent a device id or crash on a malformed oai-did cookie', async () => {
+    const { result, calls } = await runInjectedPayload({
+      cookie: 'oai-did=%E0%A4%A; _account=acct-99',
+      fetchImpl: async (url, init = {}) => {
+        if (url.endsWith('/api/auth/session')) {
+          return jsonResponse(200, { accessToken: 'session-token' });
+        }
+        if (url.includes('/backend-api/conversations?')) {
+          return jsonResponse(200, { items: [{ id: 'named-keep', title: 'Monitor upgrade decision' }] });
+        }
+        if (url.endsWith('/backend-api/conversation/named-keep') && (!init.method || init.method === 'GET')) {
+          return jsonResponse(200, { current_node: 'root', mapping: { root: { parent: null, children: [], message: null } } });
+        }
+        return jsonResponse(404, {}, 'Not Found');
+      },
+    });
+    expect(result.signedIn).toBe(true);
+    expect(result.error).toBeNull();
+    const backendCalls = calls.filter(call => call.url.includes('/backend-api/'));
+    expect(backendCalls.length).toBeGreaterThan(0);
+    for (const call of backendCalls) {
+      expect(call.headers.Authorization).toBe('Bearer session-token');
+      expect(call.headers['Chatgpt-Account-Id']).toBe('acct-99');
+    }
+  });
+
+  it('treats a failed title PATCH as a payload error and does not persist previews', async () => {
+    const { result, calls, gm } = await runInjectedPayload({
+      cookie: 'oai-did=device-from-cookie',
+      fetchImpl: async (url, init = {}) => {
+        if (url.endsWith('/api/auth/session')) {
+          return jsonResponse(200, { accessToken: 'session-token' });
+        }
+        if (url.includes('/backend-api/conversations?')) {
+          return jsonResponse(200, { items: [{ id: 'scrap-rename', title: 'New chat' }] });
+        }
+        if (url.endsWith('/backend-api/conversation/scrap-rename') && (!init.method || init.method === 'GET')) {
+          return jsonResponse(
+            200,
+            activeBranchConversation('Compare local vLLM recipes for DeepSeek V4', { text: 'later' }),
+          );
+        }
+        if (init.method === 'PATCH') {
+          return jsonResponse(401, {}, 'Unauthorized');
+        }
+        return jsonResponse(404, {}, 'Not Found');
+      },
+    });
+    expect(result.done).toBe(true);
+    expect(result.signedIn).toBe(true);
+    expect(result.mutations).toEqual([
+      expect.objectContaining({ id: 'scrap-rename', action: 'rename', ok: false }),
+    ]);
+    expect(result.error).toMatch(/401/);
+    expect(gm['chatgpt-organize:last-inventory'].scrap).toBeUndefined();
+    expect(gm['chatgpt-organize:last-inventory'].preview).toBeUndefined();
+    expect(JSON.stringify(gm['chatgpt-organize:last-inventory'])).not.toMatch(/Compare local vLLM/);
+    expect(calls.filter(call => call.method === 'PATCH')).toHaveLength(1);
   });
 
   it('treats session 401 as done with an error and does not list or PATCH', async () => {
@@ -337,6 +416,8 @@ describe('chatgpt-organize catalog gates', () => {
     expect(src).not.toContain('is_archived');
     expect(src).not.toContain('randomUUID');
     expect(src).not.toContain('chatgpt-organize:device-id');
+    expect(src).toContain('LIST_PAGE_CAP');
+    expect(src).toContain('organizeSignal()');
     expect(src).not.toMatch(/Object\.values\(mapping\)/);
   });
 });
