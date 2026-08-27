@@ -64,6 +64,30 @@
   "chat_buttons_send": {
     "message": "Enviar"
   },
+  "chat_run_running": {
+    "message": "Em execução"
+  },
+  "chat_run_queued": {
+    "message": "Na fila"
+  },
+  "chat_run_waiting": {
+    "message": "Aguardando"
+  },
+  "chat_run_error": {
+    "message": "Erro"
+  },
+  "chat_run_not_your_work": {
+    "message": "Em execução ($SOURCE$) — não é o seu turno",
+    "placeholders": {
+      "source": {
+        "content": "$1",
+        "example": "replay"
+      }
+    }
+  },
+  "chat_run_collects_previous": {
+    "message": "Na fila durante execução — a conclusão é a execução anterior"
+  },
   "chat_input_placeholder": {
     "message": "Como posso ajudar?"
   },
@@ -459,6 +483,9 @@
   },
   "bg_cmd_newTask_noTask": {
     "message": "Nenhuma tarefa fornecida"
+  },
+  "bg_cmd_newTask_active": {
+    "message": "Já há uma tarefa ativa; envie uma tarefa de acompanhamento"
   },
   "bg_cmd_followUpTask_noTask": {
     "message": "Nenhuma tarefa de acompanhamento fornecida"

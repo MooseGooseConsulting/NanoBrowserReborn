@@ -99,11 +99,20 @@ chrome.runtime.onConnect.addListener(port => {
             if (!message.task) return port.postMessage({ type: 'error', error: t('bg_cmd_newTask_noTask') });
             if (!message.tabId) return port.postMessage({ type: 'error', error: t('bg_errors_noTabId') });
 
+            const activeSnapshot = currentExecutor?.getRunSnapshot();
+            if (activeSnapshot && (activeSnapshot.running || activeSnapshot.pendingQueue.length > 0)) {
+              return port.postMessage({
+                type: 'error',
+                error: t('bg_cmd_newTask_active'),
+                snapshot: activeSnapshot,
+              });
+            }
+
             logger.info('new_task', message.tabId, message.task);
             currentExecutor = await setupExecutor(message.taskId, message.task, browserContext);
             subscribeToExecutorEvents(currentExecutor);
 
-            const result = await currentExecutor.execute();
+            const result = await currentExecutor.execute('user');
             logger.info('new_task execution result', message.tabId, result);
             break;
           }
@@ -116,10 +125,11 @@ chrome.runtime.onConnect.addListener(port => {
 
             // If executor exists, add follow-up task
             if (currentExecutor) {
-              currentExecutor.addFollowUpTask(message.task);
+              currentExecutor.addFollowUpTask(message.task, 'user');
               // Re-subscribe to events in case the previous subscription was cleaned up
               subscribeToExecutorEvents(currentExecutor);
-              const result = await currentExecutor.execute();
+              // Joins the in-flight drain if running; otherwise starts the queued turn.
+              const result = await currentExecutor.execute('user');
               logger.info('follow_up_task execution result', message.tabId, result);
             } else {
               // executor was cleaned up, can not add follow-up task
@@ -133,6 +143,11 @@ chrome.runtime.onConnect.addListener(port => {
             if (!currentExecutor) return port.postMessage({ type: 'error', error: t('bg_errors_noRunningTask') });
             await currentExecutor.cancel();
             break;
+          }
+
+          case 'run_state': {
+            const snapshot = currentExecutor?.getRunSnapshot() ?? null;
+            return port.postMessage({ type: 'run_state', snapshot });
           }
 
           case 'resume_task': {
@@ -230,6 +245,7 @@ chrome.runtime.onConnect.addListener(port => {
               // Setup executor with the new taskId and a dummy task description
               currentExecutor = await setupExecutor(message.taskId, message.task, browserContext);
               subscribeToExecutorEvents(currentExecutor);
+              port.postMessage({ type: 'replay_ready', snapshot: currentExecutor.getRunSnapshot() });
 
               // Run replayHistory with the history session ID
               const result = await currentExecutor.replayHistory(message.historySessionId);
@@ -355,7 +371,14 @@ async function subscribeToExecutorEvents(executor: Executor) {
       event.state === ExecutionState.TASK_FAIL ||
       event.state === ExecutionState.TASK_CANCEL
     ) {
-      await currentExecutor?.cleanup();
+      if (currentExecutor !== executor) {
+        return;
+      }
+      const snapshot = executor.getRunSnapshot();
+      const stillActive = snapshot.running || snapshot.pendingQueue.length > 0;
+      if (!stillActive) {
+        await executor.cleanup();
+      }
     }
   });
 }

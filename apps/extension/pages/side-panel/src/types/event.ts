@@ -40,6 +40,8 @@ export enum ExecutionState {
   ACT_START = 'act.start',
   ACT_OK = 'act.ok',
   ACT_FAIL = 'act.fail',
+
+  RUN_UPDATE = 'run.update',
 }
 
 export interface EventData {
@@ -51,6 +53,21 @@ export interface EventData {
   maxSteps: number;
   /** details is the content of the event */
   details: string;
+  run?: {
+    phase: 'running' | 'queued' | 'waiting' | 'error';
+    running: boolean;
+    queued: boolean;
+    runningTurnSource: string | null;
+    runningTurnId: string | null;
+    pendingCount: number;
+    lastRunMessageRole: 'user' | 'assistant' | null;
+    lastMessageIsError: boolean;
+    lastCompletedTurnId: string | null;
+    lastCompletedOutput: string | null;
+    lastCompletedSource: string | null;
+    busyWithUser: boolean;
+    completionKind: 'previous_run' | 'in_flight' | 'idle';
+  };
 }
 
 export class AgentEvent {

@@ -38,9 +38,16 @@ const SidePanel = () => {
   const [isProcessingSpeech, setIsProcessingSpeech] = useState(false);
   const [isReplaying, setIsReplaying] = useState(false);
   const [replayEnabled, setReplayEnabled] = useState(false);
+  const [runPhase, setRunPhase] = useState<'running' | 'queued' | 'waiting' | 'error'>('waiting');
+  const [runHint, setRunHint] = useState<string | null>(null);
+  const runPhaseRef = useRef<'running' | 'queued' | 'waiting' | 'error'>('waiting');
   const sessionIdRef = useRef<string | null>(null);
   const isReplayingRef = useRef<boolean>(false);
+  const replayPreparingRef = useRef(false);
+  const dispatchLockRef = useRef(false);
   const portRef = useRef<chrome.runtime.Port | null>(null);
+  const runStateSyncRef = useRef<Promise<void> | null>(null);
+  const resolveRunStateSyncRef = useRef<(() => void) | null>(null);
   const heartbeatIntervalRef = useRef<number | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const setInputTextRef = useRef<((text: string) => void) | null>(null);
@@ -147,12 +154,101 @@ const SidePanel = () => {
     }
   }, []);
 
+  const applyRunSnapshot = useCallback((run?: AgentEvent['data']['run']) => {
+    if (!run) {
+      return;
+    }
+    setRunPhase(run.phase);
+    runPhaseRef.current = run.phase;
+    setShowStopButton(run.running);
+    if (run.running && !run.busyWithUser && run.runningTurnSource) {
+      setRunHint(t('chat_run_not_your_work', [run.runningTurnSource]));
+    } else if (run.running && run.queued) {
+      setRunHint(t('chat_run_collects_previous'));
+    } else {
+      setRunHint(null);
+    }
+    if (run.phase === 'waiting' || run.phase === 'error') {
+      setInputEnabled(true);
+    }
+    if (run.running || run.queued) {
+      setInputEnabled(true);
+    }
+    if (run.queued || run.running) {
+      setIsFollowUpMode(true);
+      dispatchLockRef.current = true;
+    } else {
+      dispatchLockRef.current = false;
+    }
+  }, []);
+
+  const resetRunState = useCallback(() => {
+    setRunPhase('waiting');
+    runPhaseRef.current = 'waiting';
+    setRunHint(null);
+    setShowStopButton(false);
+    setIsFollowUpMode(false);
+    dispatchLockRef.current = false;
+  }, []);
+
+  const settleRunStateSync = useCallback(() => {
+    resolveRunStateSyncRef.current?.();
+    resolveRunStateSyncRef.current = null;
+    runStateSyncRef.current = null;
+  }, []);
+
+  const applyPortRunSnapshot = useCallback(
+    (snapshot: any) => {
+      if (!snapshot) {
+        resetRunState();
+        return;
+      }
+      applyRunSnapshot({
+        phase: snapshot.phase,
+        running: snapshot.running,
+        queued: snapshot.queued,
+        runningTurnSource: snapshot.runningTurnSource,
+        runningTurnId: snapshot.runningTurnId,
+        pendingCount: snapshot.pendingQueue?.length ?? 0,
+        lastRunMessageRole: snapshot.lastRunMessageRole,
+        lastMessageIsError: snapshot.lastMessageIsError,
+        lastCompletedTurnId: snapshot.lastCompletedTurnId,
+        lastCompletedOutput: snapshot.lastCompletedOutput,
+        lastCompletedSource: snapshot.lastCompletedSource,
+        busyWithUser: snapshot.running && snapshot.runningTurnSource === 'user',
+        completionKind: snapshot.queued && snapshot.running ? 'previous_run' : snapshot.running ? 'in_flight' : 'idle',
+      });
+    },
+    [applyRunSnapshot, resetRunState],
+  );
+
+  const requestRunState = useCallback((): Promise<void> => {
+    const port = portRef.current;
+    if (!port) {
+      return Promise.reject(new Error('No valid connection available'));
+    }
+    if (!runStateSyncRef.current) {
+      runStateSyncRef.current = new Promise(resolve => {
+        resolveRunStateSyncRef.current = resolve;
+      });
+      try {
+        port.postMessage({ type: 'run_state' });
+      } catch (error) {
+        settleRunStateSync();
+        return Promise.reject(error);
+      }
+    }
+    return runStateSyncRef.current;
+  }, [settleRunStateSync]);
+
   const handleTaskState = useCallback(
     (event: AgentEvent) => {
       const { actor, state, timestamp, data } = event;
       const content = data?.details;
       let skip = true;
       let displayProgress = false;
+
+      applyRunSnapshot(data?.run);
 
       switch (actor) {
         case Actors.SYSTEM:
@@ -164,14 +260,18 @@ const SidePanel = () => {
             case ExecutionState.TASK_OK:
               setIsFollowUpMode(true);
               setInputEnabled(true);
-              setShowStopButton(false);
               setIsReplaying(false);
+              if (!data?.run?.queued && !data?.run?.running) {
+                setShowStopButton(false);
+              }
               break;
             case ExecutionState.TASK_FAIL:
               setIsFollowUpMode(true);
               setInputEnabled(true);
-              setShowStopButton(false);
               setIsReplaying(false);
+              if (!data?.run?.queued && !data?.run?.running) {
+                setShowStopButton(false);
+              }
               skip = false;
               break;
             case ExecutionState.TASK_CANCEL:
@@ -184,6 +284,8 @@ const SidePanel = () => {
             case ExecutionState.TASK_PAUSE:
               break;
             case ExecutionState.TASK_RESUME:
+              break;
+            case ExecutionState.RUN_UPDATE:
               break;
             default:
               console.error('Invalid task state', state);
@@ -280,7 +382,7 @@ const SidePanel = () => {
         });
       }
     },
-    [appendMessage],
+    [appendMessage, applyRunSnapshot],
   );
 
   // Stop heartbeat and close connection
@@ -312,13 +414,32 @@ const SidePanel = () => {
           handleTaskState(message);
         } else if (message && message.type === 'error') {
           // Handle error messages from service worker
+          replayPreparingRef.current = false;
           appendMessage({
             actor: Actors.SYSTEM,
             content: message.error || t('errors_unknown'),
             timestamp: Date.now(),
           });
+          if (message.snapshot) {
+            applyPortRunSnapshot(message.snapshot);
+            settleRunStateSync();
+            return;
+          }
           setInputEnabled(true);
-          setShowStopButton(false);
+          resetRunState();
+        } else if (message && message.type === 'run_state') {
+          if (!replayPreparingRef.current) {
+            applyPortRunSnapshot(message.snapshot);
+          }
+          settleRunStateSync();
+        } else if (message && message.type === 'replay_ready') {
+          applyPortRunSnapshot(message.snapshot);
+          replayPreparingRef.current = false;
+          setInputEnabled(true);
+          setIsFollowUpMode(true);
+          dispatchLockRef.current = true;
+          setIsReplaying(true);
+          settleRunStateSync();
         } else if (message && message.type === 'speech_to_text_result') {
           // Handle speech-to-text result
           if (message.text && setInputTextRef.current) {
@@ -346,8 +467,10 @@ const SidePanel = () => {
           clearInterval(heartbeatIntervalRef.current);
           heartbeatIntervalRef.current = null;
         }
+        replayPreparingRef.current = false;
         setInputEnabled(true);
-        setShowStopButton(false);
+        resetRunState();
+        settleRunStateSync();
       });
 
       // Setup heartbeat interval
@@ -367,6 +490,10 @@ const SidePanel = () => {
           stopConnection(); // Stop if port is invalid
         }
       }, 25000);
+
+      requestRunState().catch(error => {
+        console.error('Failed to request run_state:', error);
+      });
     } catch (error) {
       console.error('Failed to establish connection:', error);
       appendMessage({
@@ -377,7 +504,7 @@ const SidePanel = () => {
       // Clear any references since connection failed
       portRef.current = null;
     }
-  }, [handleTaskState, appendMessage, stopConnection]);
+  }, [handleTaskState, appendMessage, stopConnection, applyPortRunSnapshot, resetRunState, requestRunState, settleRunStateSync]);
 
   // Add safety check for message sending
   const sendMessage = useCallback(
@@ -443,8 +570,14 @@ const SidePanel = () => {
       sessionIdRef.current = newTaskId;
 
       // Send replay command to background
+      // Keep input disabled until the background owns the new replay executor.
+      // `replay_ready` then enables follow-ups against that exact executor.
+      replayPreparingRef.current = true;
       setInputEnabled(false);
-      setShowStopButton(true);
+      setShowStopButton(false);
+      setRunPhase('queued');
+      runPhaseRef.current = 'queued';
+      setRunHint(t('chat_run_not_your_work', ['replay']));
 
       // Reset follow-up mode and historical session flags
       setIsFollowUpMode(false);
@@ -480,6 +613,7 @@ const SidePanel = () => {
       });
       setIsReplaying(true);
     } catch (err) {
+      replayPreparingRef.current = false;
       const errorMessage = err instanceof Error ? err.message : String(err);
       appendMessage({
         actor: Actors.SYSTEM,
@@ -571,17 +705,35 @@ const SidePanel = () => {
     }
 
     try {
+      // A reconnect must learn the background-owned executor before deciding
+      // whether this message starts a new session or follows up an active run.
+      if (!portRef.current) {
+        setupConnection();
+      }
+      await requestRunState();
+
       const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
       const tabId = tabs[0]?.id;
       if (!tabId) {
         throw new Error('No active tab found');
       }
 
-      setInputEnabled(false);
-      setShowStopButton(true);
+      setShowStopButton(runPhaseRef.current === 'running');
+
+      const shouldFollowUp =
+        isFollowUpMode ||
+        runPhaseRef.current === 'running' ||
+        runPhaseRef.current === 'queued' ||
+        dispatchLockRef.current;
+
+      dispatchLockRef.current = true;
 
       // Create a new chat session for this task if not in follow-up mode
-      if (!isFollowUpMode) {
+      if (!shouldFollowUp) {
+        setInputEnabled(false);
+        setRunPhase('running');
+        runPhaseRef.current = 'running';
+        setShowStopButton(true);
         // Use display text for session title if available, otherwise use full text
         const titleText = displayText || text;
         const newSession = await chatHistoryStore.createSession(
@@ -604,13 +756,12 @@ const SidePanel = () => {
       // Pass the sessionId directly to appendMessage
       appendMessage(userMessage, sessionIdRef.current);
 
-      // Setup connection if not exists
-      if (!portRef.current) {
-        setupConnection();
+      dispatchLockRef.current = true;
+      if (!shouldFollowUp) {
+        setShowStopButton(true);
       }
 
-      // Send message using the utility function
-      if (isFollowUpMode) {
+      if (shouldFollowUp) {
         // Send as follow-up task
         await sendMessage({
           type: 'follow_up_task',
@@ -639,6 +790,10 @@ const SidePanel = () => {
       });
       setInputEnabled(true);
       setShowStopButton(false);
+      dispatchLockRef.current = false;
+      runPhaseRef.current = 'waiting';
+      setRunPhase('waiting');
+      setRunHint(null);
       stopConnection();
     }
   };
@@ -670,6 +825,10 @@ const SidePanel = () => {
     setShowStopButton(false);
     setIsFollowUpMode(false);
     setIsHistoricalSession(false);
+    dispatchLockRef.current = false;
+    runPhaseRef.current = 'waiting';
+    setRunPhase('waiting');
+    setRunHint(null);
 
     // Disconnect any existing connection
     stopConnection();
@@ -1135,6 +1294,8 @@ const SidePanel = () => {
                         isProcessingSpeech={isProcessingSpeech}
                         disabled={!inputEnabled || isHistoricalSession}
                         showStopButton={showStopButton}
+                        runPhase={runPhase}
+                        runHint={runHint}
                         setContent={setter => {
                           setInputTextRef.current = setter;
                         }}
@@ -1173,6 +1334,8 @@ const SidePanel = () => {
                       isProcessingSpeech={isProcessingSpeech}
                       disabled={!inputEnabled || isHistoricalSession}
                       showStopButton={showStopButton}
+                      runPhase={runPhase}
+                      runHint={runHint}
                       setContent={setter => {
                         setInputTextRef.current = setter;
                       }}

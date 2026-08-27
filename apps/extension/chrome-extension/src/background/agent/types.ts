@@ -6,6 +6,7 @@ import type MessageManager from './messages/service';
 import type { EventManager } from './event/manager';
 import { type Actors, type ExecutionState, AgentEvent } from './event/types';
 import { AgentStepHistory } from './history';
+import { RunSession, type RunSnapshot } from './run-state';
 
 export interface AgentOptions {
   maxSteps: number;
@@ -51,6 +52,7 @@ export class AgentContext {
   finalAnswer: string | null;
   /** Per-script keep-current rewrite cap for this Executor run. Cleared on follow-up tasks. */
   keepCurrentRewrittenScriptIds: Set<string>;
+  runSession: RunSession;
 
   constructor(
     taskId: string,
@@ -76,14 +78,36 @@ export class AgentContext {
     this.history = new AgentStepHistory();
     this.finalAnswer = null;
     this.keepCurrentRewrittenScriptIds = new Set();
+    this.runSession = new RunSession();
+  }
+
+  getRunSnapshot(): RunSnapshot {
+    return this.runSession.snapshot();
   }
 
   async emitEvent(actor: Actors, state: ExecutionState, eventDetails: string) {
+    const snap = this.runSession.snapshot();
+    const collected = this.runSession.collectCompletion();
     const event = new AgentEvent(actor, state, {
       taskId: this.taskId,
       step: this.nSteps,
       maxSteps: this.options.maxSteps,
       details: eventDetails,
+      run: {
+        phase: snap.phase,
+        running: snap.running,
+        queued: snap.queued,
+        runningTurnSource: snap.runningTurnSource,
+        runningTurnId: snap.runningTurnId,
+        pendingCount: snap.pendingQueue.length,
+        lastRunMessageRole: snap.lastRunMessageRole,
+        lastMessageIsError: snap.lastMessageIsError,
+        lastCompletedTurnId: snap.lastCompletedTurnId,
+        lastCompletedOutput: snap.lastCompletedOutput,
+        lastCompletedSource: snap.lastCompletedSource,
+        busyWithUser: this.runSession.isBusyWith('user'),
+        completionKind: collected.kind,
+      },
     });
     await this.eventManager.emit(event);
   }

@@ -64,6 +64,30 @@
   "chat_buttons_send": {
     "message": "傳送"
   },
+  "chat_run_running": {
+    "message": "執行中"
+  },
+  "chat_run_queued": {
+    "message": "排隊中"
+  },
+  "chat_run_waiting": {
+    "message": "等待中"
+  },
+  "chat_run_error": {
+    "message": "錯誤"
+  },
+  "chat_run_not_your_work": {
+    "message": "執行中（$SOURCE$）— 不是你的回合",
+    "placeholders": {
+      "source": {
+        "content": "$1",
+        "example": "replay"
+      }
+    }
+  },
+  "chat_run_collects_previous": {
+    "message": "執行中又排隊 — 完成檢查會收到上一輪結果"
+  },
   "chat_input_placeholder": {
     "message": "有什麼需要協助的嗎？"
   },
@@ -453,6 +477,9 @@
   },
   "bg_cmd_newTask_noTask": {
     "message": "未提供任務"
+  },
+  "bg_cmd_newTask_active": {
+    "message": "已有執行中的任務；請改為傳送後續任務"
   },
   "bg_cmd_followUpTask_noTask": {
     "message": "未提供後續任務"

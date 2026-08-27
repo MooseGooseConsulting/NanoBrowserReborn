@@ -16,6 +16,8 @@ interface ChatInputProps {
   // Historical session ID - if provided, shows replay button instead of send button
   historicalSessionId?: string | null;
   onReplay?: (sessionId: string) => void;
+  runPhase?: 'running' | 'queued' | 'waiting' | 'error';
+  runHint?: string | null;
 }
 
 // File attachment interface
@@ -37,6 +39,8 @@ export default function ChatInput({
   isDarkMode = false,
   historicalSessionId,
   onReplay,
+  runPhase = 'waiting',
+  runHint = null,
 }: ChatInputProps) {
   const [text, setText] = useState('');
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
@@ -238,6 +242,24 @@ export default function ChatInput({
         />
 
         <div
+          className={`flex items-center justify-between px-2 py-1 text-xs ${
+            isDarkMode ? 'bg-slate-800 text-gray-400' : 'bg-white text-gray-500'
+          }`}
+          data-run-phase={runPhase}
+          role="status">
+          <span>
+            {runPhase === 'running'
+              ? t('chat_run_running')
+              : runPhase === 'queued'
+                ? t('chat_run_queued')
+                : runPhase === 'error'
+                  ? t('chat_run_error')
+                  : t('chat_run_waiting')}
+            {runHint ? ` · ${runHint}` : ''}
+          </span>
+        </div>
+
+        <div
           className={`flex items-center justify-between px-2 py-1.5 ${
             disabled ? (isDarkMode ? 'bg-slate-800' : 'bg-gray-100') : isDarkMode ? 'bg-slate-800' : 'bg-white'
           }`}>
@@ -300,14 +322,16 @@ export default function ChatInput({
             )}
           </div>
 
-          {showStopButton ? (
+          <div className="flex items-center gap-2">
+          {showStopButton && (
             <button
               type="button"
               onClick={onStopTask}
               className="rounded-md bg-red-500 px-3 py-1 text-white transition-colors hover:bg-red-600">
               {t('chat_buttons_stop')}
             </button>
-          ) : historicalSessionId ? (
+          )}
+          {!showStopButton && historicalSessionId ? (
             <button
               type="button"
               onClick={handleReplay}
@@ -325,6 +349,7 @@ export default function ChatInput({
               {t('chat_buttons_send')}
             </button>
           )}
+          </div>
         </div>
       </div>
     </form>
