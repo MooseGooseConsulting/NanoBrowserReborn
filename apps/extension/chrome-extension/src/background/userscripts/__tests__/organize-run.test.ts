@@ -112,6 +112,14 @@ describe('chatgpt-organize action wait helpers', () => {
         mutations: [{ id: 'scrap-rename', action: 'rename', ok: false, error: 'PATCH failed: 401 Unauthorized' }],
       }),
     ).toBe('PATCH failed: 401 Unauthorized');
+    expect(
+      organizeActionFailure({
+        done: true,
+        signedIn: true,
+        error: '/conversation/scrap-a failed: 500 Internal Server Error',
+        mutations: [],
+      }),
+    ).toBe('/conversation/scrap-a failed: 500 Internal Server Error');
     expect(organizeActionFailure({ done: true, signedIn: true, error: null, mutations: [{ ok: true }] })).toBeNull();
   });
 

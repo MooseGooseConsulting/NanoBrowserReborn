@@ -152,7 +152,12 @@
       body: options.body ? JSON.stringify(options.body) : undefined,
       signal: organizeSignal(),
     });
-    return readJson(response, path);
+    const data = await readJson(response, path);
+    // Vendor conversation PATCH helpers consume `success`. HTTP 200 + success:false is a failed mutation.
+    if (data && data.success === false) {
+      throw new Error(`${path} rejected: success=false`);
+    }
+    return data;
   }
 
   function activeBranch(conversation) {
@@ -310,11 +315,15 @@
       } catch (error) {
         const message = String(error && error.message ? error.message : error);
         jsonById[item.id] = { error: message };
-        if (/\b401\b/.test(message)) {
+        if (/\b(401|429)\b/.test(message)) {
           result.error = message;
           break;
         }
       }
+    }
+    if (fetchQueue.length && result.fetchedJson === 0 && !result.error) {
+      const firstFail = fetchQueue.map(item => jsonById[item.id]).find(raw => raw && raw.error);
+      result.error = (firstFail && firstFail.error) || 'chatgpt-organize conversation fetch failed';
     }
 
     let renameCount = 0;

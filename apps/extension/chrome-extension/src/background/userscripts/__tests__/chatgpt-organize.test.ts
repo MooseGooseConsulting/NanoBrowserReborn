@@ -364,6 +364,134 @@ describe('chatgpt-organize injected payload (mocked fetch)', () => {
     expect(calls.filter(call => call.method === 'PATCH')).toHaveLength(1);
   });
 
+  it('treats HTTP 200 PATCH { success: false } as a failed mutation and does not keep the local title', async () => {
+    const { result, calls } = await runInjectedPayload({
+      cookie: 'oai-did=device-from-cookie',
+      fetchImpl: async (url, init = {}) => {
+        if (url.endsWith('/api/auth/session')) {
+          return jsonResponse(200, { accessToken: 'session-token' });
+        }
+        if (url.includes('/backend-api/conversations?')) {
+          return jsonResponse(200, { items: [{ id: 'scrap-rename', title: 'New chat' }] });
+        }
+        if (url.endsWith('/backend-api/conversation/scrap-rename') && (!init.method || init.method === 'GET')) {
+          return jsonResponse(
+            200,
+            activeBranchConversation('Compare local vLLM recipes for DeepSeek V4', { text: 'later' }),
+          );
+        }
+        if (init.method === 'PATCH') {
+          return jsonResponse(200, { success: false });
+        }
+        return jsonResponse(404, {}, 'Not Found');
+      },
+    });
+    expect(result.done).toBe(true);
+    expect(result.signedIn).toBe(true);
+    expect(result.mutations).toEqual([
+      expect.objectContaining({
+        id: 'scrap-rename',
+        action: 'rename',
+        title: 'Compare local vLLM recipes for DeepSeek V4',
+        ok: false,
+        error: expect.stringMatching(/success=false/),
+      }),
+    ]);
+    expect(result.error).toMatch(/success=false/);
+    expect(result.scrap[0].title).toBe('New chat');
+    expect(calls.filter(call => call.method === 'PATCH')).toHaveLength(1);
+  });
+
+  it('fails when every conversation-detail GET fails and does not PATCH', async () => {
+    const { result, calls } = await runInjectedPayload({
+      href: 'https://chatgpt.com/',
+      cookie: 'oai-did=device-from-cookie',
+      fetchImpl: async (url, init = {}) => {
+        if (url.endsWith('/api/auth/session')) {
+          return jsonResponse(200, { accessToken: 'session-token' });
+        }
+        if (url.includes('/backend-api/conversations?')) {
+          return jsonResponse(200, {
+            items: [
+              { id: 'scrap-a', title: 'New chat' },
+              { id: 'scrap-b', title: 'Untitled' },
+            ],
+          });
+        }
+        if (/\/backend-api\/conversation\/scrap-[ab]$/.test(url) && (!init.method || init.method === 'GET')) {
+          return jsonResponse(500, {}, 'Internal Server Error');
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      },
+    });
+    expect(result.done).toBe(true);
+    expect(result.signedIn).toBe(true);
+    expect(result.fetchedJson).toBe(0);
+    expect(result.error).toMatch(/500/);
+    expect(result.mutations).toEqual([]);
+    expect(calls.filter(call => call.method === 'PATCH')).toEqual([]);
+  });
+
+  it('skips a 404 scrap but still titles others', async () => {
+    const { result, calls } = await runInjectedPayload({
+      cookie: 'oai-did=device-from-cookie',
+      fetchImpl: async (url, init = {}) => {
+        if (url.endsWith('/api/auth/session')) {
+          return jsonResponse(200, { accessToken: 'session-token' });
+        }
+        if (url.includes('/backend-api/conversations?')) {
+          return jsonResponse(200, {
+            items: [
+              { id: 'scrap-gone', title: 'New chat' },
+              { id: 'scrap-rename', title: 'Untitled' },
+            ],
+          });
+        }
+        if (url.endsWith('/backend-api/conversation/scrap-gone') && (!init.method || init.method === 'GET')) {
+          return jsonResponse(404, {}, 'Not Found');
+        }
+        if (url.endsWith('/backend-api/conversation/scrap-rename') && (!init.method || init.method === 'GET')) {
+          return jsonResponse(
+            200,
+            activeBranchConversation('Compare local vLLM recipes for DeepSeek V4', { text: 'later' }),
+          );
+        }
+        if (init.method === 'PATCH') {
+          return jsonResponse(200, { success: true });
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      },
+    });
+    expect(result.error).toBeNull();
+    expect(result.mutations).toEqual([
+      { id: 'scrap-rename', action: 'rename', title: 'Compare local vLLM recipes for DeepSeek V4', ok: true },
+    ]);
+    expect(calls.filter(call => call.method === 'PATCH')).toHaveLength(1);
+  });
+
+  it('treats a conversation-detail 429 as a payload error and does not PATCH', async () => {
+    const { result, calls } = await runInjectedPayload({
+      cookie: 'oai-did=device-from-cookie',
+      fetchImpl: async (url, init = {}) => {
+        if (url.endsWith('/api/auth/session')) {
+          return jsonResponse(200, { accessToken: 'session-token' });
+        }
+        if (url.includes('/backend-api/conversations?')) {
+          return jsonResponse(200, { items: [{ id: 'scrap-rename', title: 'New chat' }] });
+        }
+        if (url.endsWith('/backend-api/conversation/scrap-rename') && (!init.method || init.method === 'GET')) {
+          return jsonResponse(429, {}, 'Too Many Requests');
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      },
+    });
+    expect(result.done).toBe(true);
+    expect(result.signedIn).toBe(true);
+    expect(result.error).toMatch(/429/);
+    expect(result.mutations).toEqual([]);
+    expect(calls.filter(call => call.method === 'PATCH')).toEqual([]);
+  });
+
   it('treats a conversation-detail 401 as a payload error and does not PATCH', async () => {
     const { result, calls } = await runInjectedPayload({
       cookie: 'oai-did=device-from-cookie',
@@ -514,6 +642,7 @@ describe('chatgpt-organize catalog gates', () => {
     expect(src).not.toContain('is_archived');
     expect(src).not.toContain('randomUUID');
     expect(src).not.toContain('chatgpt-organize:device-id');
+    expect(src).toContain('success === false');
     expect(src).toContain('LIST_PAGE_CAP');
     expect(src).toContain('organizeSignal()');
     expect(src).not.toMatch(/Object\.values\(mapping\)/);
