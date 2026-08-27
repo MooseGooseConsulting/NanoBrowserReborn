@@ -15,8 +15,9 @@ runs:
     - name: Enable Corepack
       shell: bash
       # Node 22.12 ships Corepack <0.31, which rejects npm's rotated signing key.
+      # Pin Corepack so CI does not float on @latest.
       run: |
-        npm install -g corepack@latest
+        npm install -g corepack@0.34.6
         corepack enable
         corepack prepare pnpm@9.15.1 --activate
 
@@ -24,15 +25,18 @@ runs:
       id: pnpm-store
       shell: bash
       working-directory: apps/extension
-      run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      run: |
+        echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+        echo "node=$(node -v)" >> "$GITHUB_OUTPUT"
+        echo "pnpm=$(pnpm -v)" >> "$GITHUB_OUTPUT"
 
     - name: Cache pnpm store
       uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
       with:
         path: ${{ steps.pnpm-store.outputs.path }}
-        key: ${{ runner.os }}-pnpm-${{ hashFiles('apps/extension/pnpm-lock.yaml') }}
+        key: ${{ runner.os }}-${{ steps.pnpm-store.outputs.node }}-pnpm-${{ steps.pnpm-store.outputs.pnpm }}-${{ hashFiles('apps/extension/pnpm-lock.yaml') }}
         restore-keys: |
-          ${{ runner.os }}-pnpm-
+          ${{ runner.os }}-${{ steps.pnpm-store.outputs.node }}-pnpm-${{ steps.pnpm-store.outputs.pnpm }}-
 
     - name: Install
       shell: bash
