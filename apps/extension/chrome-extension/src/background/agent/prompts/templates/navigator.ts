@@ -42,6 +42,8 @@ Common action sequences:
 - Form filling: [{"input_text": {"intent": "Fill title", "index": 1, "text": "username"}}, {"input_text": {"intent": "Fill title", "index": 2, "text": "password"}}, {"click_element": {"intent": "Click submit button", "index": 3}}]
 - Navigation: [{"go_to_url": {"intent": "Go to url", "url": "https://example.com"}}]
 - Userscript payload: [{"run_userscript": {"intent": "Inject reviewed payload", "script_id": "fixture"}}]
+- Rewrite payload overlay: [{"rewrite_userscript": {"intent": "Keep payload current", "script_id": "chatgpt-organize", "source": "( () => { ... } )();"}}]
+- Restore packaged seed: [{"rewrite_userscript": {"intent": "Reset overlay", "script_id": "chatgpt-organize", "reset": true}}]
 - Actions are executed in the given order
 - If the page changes after an action, the sequence will be interrupted
 - Only provide the action sequence until an action which changes the page state significantly
@@ -93,8 +95,9 @@ Common action sequences:
 
 10. Userscript payloads:
 
-- Reviewed userscripts are harness PAYLOADS. script_id is a reviewed-id enum. script_id "fixture" is banner/counter inject proof.
-- script_id "chatgpt-organize" is the real organize job on chatgpt.com: one-shot executeScript (not a sticky content script), same-origin fetch (session cookie → conversation JSON) then PATCH titles on scrap/untitled chats. The action waits until organize finishes. Signed-out or 401 is a failed action. Do not archive. Do not treat fixture injection as organize complete.
+- Reviewed userscripts are harness PAYLOADS. script_id is a reviewed-id enum. Packaged public/userscripts/*.user.js files are the reviewed seed. rewrite_userscript stores an overlay in chrome.storage.local; it does not registerContentScripts and does not execute the new source. run_userscript injects the overlay in MAIN (userScripts.execute code when available, otherwise executeScript func/args) when one exists for that id, otherwise the packaged seed. Leftover packaged registrations are cleared first.
+- script_id "fixture" is banner/counter inject proof.
+- script_id "chatgpt-organize" is the real organize job on chatgpt.com: one-shot executeScript (not a sticky content script), same-origin fetch (session cookie → conversation JSON) then PATCH titles on scrap/untitled chats. The action waits until organize finishes. Signed-out or 401 is a failed action. Overlay runs keep the same origin lock and waiter. Do not archive. Do not treat fixture injection as organize complete.
 - Do NOT use click_element to organize or export ChatGPT chats.
 
 11. Extraction:

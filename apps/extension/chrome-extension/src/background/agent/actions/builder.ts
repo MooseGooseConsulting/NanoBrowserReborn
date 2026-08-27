@@ -23,6 +23,7 @@ import {
   scrollToTopActionSchema,
   scrollToBottomActionSchema,
   runUserscriptActionSchema,
+  rewriteUserscriptActionSchema,
 } from './schemas';
 import { z } from 'zod';
 import { createLogger } from '@src/background/log';
@@ -30,7 +31,12 @@ import { ExecutionState, Actors } from '../event/types';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { wrapUntrustedContent } from '../messages/utils';
 import { URLNotAllowedError } from '@src/background/browser/views';
-import { registerAndRunReviewedUserscript, type UserscriptChromeApi } from '@src/background/userscripts/register';
+import {
+  assertUserscriptOrigin,
+  isInjectableHttpUrl,
+  registerAndRunReviewedUserscript,
+  type UserscriptChromeApi,
+} from '@src/background/userscripts/register';
 import {
   armChatGptOrganizeRun,
   assertChatGptOrganizeTabAllowed,
@@ -41,6 +47,9 @@ import {
   unregisterChatGptOrganize,
   waitForChatGptOrganizeDone,
 } from '@src/background/userscripts/organize-run';
+import { chromeOverlayStorage } from '@src/background/userscripts/overlay';
+import { injectReviewedOverlay, resolveRunSource, rewriteUserscript } from '@src/background/userscripts/rewrite';
+import { isReviewedUserscriptId } from '@src/background/userscripts/catalog';
 
 const logger = createLogger('Action');
 
@@ -734,13 +743,14 @@ export class ActionBuilder {
 
         const firewall = this.context.browserContext.getConfig();
         const api = chrome as UserscriptChromeApi;
+        const overlay = await resolveRunSource(chromeOverlayStorage(), scriptId);
         const isOrganize = isChatGptOrganizeScript(scriptId);
         if (isOrganize) {
           assertChatGptOrganizeTabAllowed(tabUrl, firewall.allowedUrls, firewall.deniedUrls);
           return await runExclusiveChatGptOrganize(page.tabId, async () => {
             await armChatGptOrganizeRun(api, page.tabId);
             try {
-              const injected = await executeChatGptOrganizeOnce(api, page.tabId);
+              const injected = await executeChatGptOrganizeOnce(api, page.tabId, overlay);
               const state = await waitForChatGptOrganizeDone(api, page.tabId);
               const failure = organizeActionFailure(state);
               if (failure) {
@@ -757,6 +767,20 @@ export class ActionBuilder {
               await unregisterChatGptOrganize(api);
             }
           });
+        }
+
+        if (overlay) {
+          if (!isReviewedUserscriptId(scriptId)) {
+            throw new Error(`Unknown reviewed userscript id: ${scriptId}`);
+          }
+          if (!isInjectableHttpUrl(tabUrl, firewall.allowedUrls, firewall.deniedUrls)) {
+            throw new URLNotAllowedError(`URL: ${tabUrl} is not allowed`);
+          }
+          assertUserscriptOrigin(scriptId, tabUrl);
+          const injected = await injectReviewedOverlay(api, page.tabId, overlay, scriptId);
+          const msg = t('act_runUserscript_ok', [scriptId, injected.mode]);
+          this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);
+          return new ActionResult({ extractedContent: msg, includeInMemory: true });
         }
 
         const result = await registerAndRunReviewedUserscript(api, {
@@ -779,6 +803,30 @@ export class ActionBuilder {
       }
     }, runUserscriptActionSchema);
     actions.push(runUserscript);
+
+    const rewriteUserscriptAction = new Action(async (input: z.infer<typeof rewriteUserscriptActionSchema.schema>) => {
+      const scriptId = input.script_id;
+      const intent = input.intent || t('act_rewriteUserscript_start', [scriptId]);
+      this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_START, intent);
+
+      try {
+        const result = await rewriteUserscript(chromeOverlayStorage(), {
+          scriptId,
+          source: input.source,
+          reset: input.reset,
+        });
+        const msg = result.reset
+          ? t('act_rewriteUserscript_reset_ok', [result.scriptId])
+          : t('act_rewriteUserscript_ok', [result.scriptId, result.sourceHash || '']);
+        this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);
+        return new ActionResult({ extractedContent: msg, includeInMemory: true });
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_FAIL, msg);
+        return new ActionResult({ error: msg, includeInMemory: true });
+      }
+    }, rewriteUserscriptActionSchema);
+    actions.push(rewriteUserscriptAction);
 
     return actions;
   }

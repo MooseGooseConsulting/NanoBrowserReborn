@@ -26,6 +26,15 @@ export const REVIEWED_USERSCRIPT_HOSTS: Record<ReviewedUserscriptId, readonly st
   [CHATGPT_ORGANIZE_SCRIPT_ID]: ['chatgpt.com'],
 };
 
+/**
+ * MAIN-world identity hooks rewrite validation and the runner wait on.
+ * Packaged seeds under public/userscripts/ must include these; overlays must too.
+ */
+export const PAYLOAD_IDENTITY_HOOKS: Record<ReviewedUserscriptId, readonly string[]> = {
+  [FIXTURE_SCRIPT_ID]: ['__nanoUserscriptPoc'],
+  [CHATGPT_ORGANIZE_SCRIPT_ID]: ['__nanoChatGptOrganize', '__nanoOrganizeRun'],
+};
+
 export type UserscriptRegistrationMode = 'chrome.scripting.registerContentScripts' | 'chrome.userScripts';
 
 export function isReviewedUserscriptId(id: string): id is ReviewedUserscriptId {
@@ -36,12 +45,16 @@ export function payloadFileFor(scriptId: ReviewedUserscriptId): string {
   return PAYLOAD_FILE_BY_ID[scriptId];
 }
 
+export function helperFilesForMode(mode: UserscriptRegistrationMode): string[] {
+  const modeFile = mode === 'chrome.userScripts' ? USER_SCRIPTS_MODE_FILE : PACKAGED_MODE_FILE;
+  return [modeFile, COMPAT_FILE];
+}
+
 export function filesForMode(mode: UserscriptRegistrationMode, scriptId: string): string[] {
   if (!isReviewedUserscriptId(scriptId)) {
     throw new Error(`Unknown reviewed userscript id: ${scriptId}`);
   }
-  const modeFile = mode === 'chrome.userScripts' ? USER_SCRIPTS_MODE_FILE : PACKAGED_MODE_FILE;
-  return [modeFile, COMPAT_FILE, payloadFileFor(scriptId)];
+  return [...helperFilesForMode(mode), payloadFileFor(scriptId)];
 }
 
 export function contentScriptIdFor(scriptId: string): string {

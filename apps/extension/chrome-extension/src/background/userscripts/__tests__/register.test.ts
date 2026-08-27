@@ -373,6 +373,8 @@ describe('navigator userscript prompt', () => {
     expect(navigatorSystemPromptTemplate).toMatch(/PATCH titles on scrap/);
     expect(navigatorSystemPromptTemplate).not.toMatch(/catalog hook/);
     expect(navigatorSystemPromptTemplate).not.toMatch(/does not organize or export chats/);
+    expect(navigatorSystemPromptTemplate).toMatch(/overlay/);
+    expect(navigatorSystemPromptTemplate).toMatch(/rewrite_userscript/);
   });
 });
 

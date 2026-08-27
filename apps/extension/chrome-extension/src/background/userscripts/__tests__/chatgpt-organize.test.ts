@@ -12,6 +12,7 @@ import {
 } from '../catalog';
 import { assertUserscriptOrigin } from '../register';
 import { URLNotAllowedError } from '@src/background/browser/views';
+import { assertSourceMatchesChatGptOrganizeContract } from '../chatgpt-organize-contract';
 
 type FetchInit = { method?: string; headers?: Record<string, string>; body?: string };
 type FetchCall = { url: string; method: string; headers: Record<string, string>; body?: string };
@@ -70,12 +71,19 @@ type RunOptions = {
   cookie?: string;
   oneShot?: boolean;
   deadlineExpired?: boolean;
+  source?: string;
   fetchImpl: (url: string, init?: FetchInit) => Promise<MockResponse>;
 };
 
+/** Bytes Chrome injects for the packaged seed. Tests must not use a parallel TS helper. */
 function payloadSource() {
   const here = dirname(fileURLToPath(import.meta.url));
   return readFileSync(resolve(here, '../../../../public/userscripts/chatgpt-organize.user.js'), 'utf8');
+}
+
+/** Overlay when set, otherwise the packaged .user.js seed — the same bytes Chrome would run. */
+function sourceChromeWouldRun(overlaySource?: string) {
+  return overlaySource ?? payloadSource();
 }
 
 function jsonResponse(status: number, body: unknown, statusText = 'OK'): MockResponse {
@@ -213,7 +221,7 @@ async function runInjectedPayload(options: RunOptions) {
     context.__nanoOrganizeAbort = new AbortController();
     context.__nanoOrganizeAbort.abort();
   }
-  vm.runInNewContext(payloadSource(), context, { timeout: 5000 });
+  vm.runInNewContext(sourceChromeWouldRun(options.source), context, { timeout: 5000 });
   const started = Date.now();
   while (Date.now() - started < 20000) {
     if (context.__nanoChatGptOrganize && context.__nanoChatGptOrganize.done) {
@@ -653,6 +661,18 @@ describe('chatgpt-organize injected payload (mocked fetch)', () => {
     expect(calls).toEqual([]);
   });
 
+  it('overlay bytes still refuse off-origin fetch', async () => {
+    const { result, calls } = await runInjectedPayload({
+      href: 'https://example.com/',
+      source: `${payloadSource()}\n/* overlay-keep-current */`,
+      fetchImpl: async () => {
+        throw new Error('fetch should not run');
+      },
+    });
+    expect(result.error).toMatch(/only allowed on chatgpt.com/);
+    expect(calls).toEqual([]);
+  });
+
   it('does not fetch on chat.openai.com because it 308s and does not serve /backend-api', async () => {
     const { result, calls } = await runInjectedPayload({
       href: 'https://chat.openai.com/c/abc',
@@ -713,5 +733,24 @@ describe('chatgpt-organize catalog gates', () => {
     expect(src).toContain('organizeSignal()');
     expect(src).not.toMatch(/Object\.values\(mapping\)/);
     expect(src).toContain('for (const queued of fetchQueue)');
+    expect(() => assertSourceMatchesChatGptOrganizeContract(src)).not.toThrow();
+  });
+
+  it('exercises overlay bytes, not a parallel TS reimplementation', async () => {
+    const overlay = `${payloadSource()}\n/* overlay-keep-current */`;
+    expect(() => assertSourceMatchesChatGptOrganizeContract(overlay)).not.toThrow();
+    const { result, calls } = await runInjectedPayload({
+      source: overlay,
+      fetchImpl: async url => {
+        if (url.endsWith('/api/auth/session')) {
+          return jsonResponse(401, {}, 'Unauthorized');
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      },
+    });
+    expect(result.done).toBe(true);
+    expect(result.signedIn).toBe(false);
+    expect(result.error).toMatch(/session failed: 401/);
+    expect(calls.filter(call => call.url.includes('/backend-api/'))).toEqual([]);
   });
 });

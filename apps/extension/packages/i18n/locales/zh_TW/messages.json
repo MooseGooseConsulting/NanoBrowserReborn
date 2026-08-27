@@ -961,7 +961,7 @@
     }
   },
   "act_runUserscript_start": {
-    "message": "正在註冊並執行 userscript $SCRIPT_ID$",
+    "message": "正在執行 userscript $SCRIPT_ID$",
     "placeholders": {
       "script_id": {
         "content": "$1",
@@ -979,6 +979,37 @@
       "mode": {
         "content": "$2",
         "example": "chrome.scripting.registerContentScripts"
+      }
+    }
+  },
+  "act_rewriteUserscript_start": {
+    "message": "正在改寫 userscript overlay $SCRIPT_ID$",
+    "placeholders": {
+      "script_id": {
+        "content": "$1",
+        "example": "fixture"
+      }
+    }
+  },
+  "act_rewriteUserscript_ok": {
+    "message": "已儲存 $SCRIPT_ID$ overlay，hash $HASH$",
+    "placeholders": {
+      "script_id": {
+        "content": "$1",
+        "example": "fixture"
+      },
+      "hash": {
+        "content": "$2",
+        "example": "abc123"
+      }
+    }
+  },
+  "act_rewriteUserscript_reset_ok": {
+    "message": "已清除 $SCRIPT_ID$ overlay；將改跑套件內 seed",
+    "placeholders": {
+      "script_id": {
+        "content": "$1",
+        "example": "fixture"
       }
     }
   }
