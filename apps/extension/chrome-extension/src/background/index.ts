@@ -103,7 +103,7 @@ chrome.runtime.onConnect.addListener(port => {
             currentExecutor = await setupExecutor(message.taskId, message.task, browserContext);
             subscribeToExecutorEvents(currentExecutor);
 
-            const result = await currentExecutor.execute();
+            const result = await currentExecutor.execute('user');
             logger.info('new_task execution result', message.tabId, result);
             break;
           }
@@ -116,10 +116,11 @@ chrome.runtime.onConnect.addListener(port => {
 
             // If executor exists, add follow-up task
             if (currentExecutor) {
-              currentExecutor.addFollowUpTask(message.task);
+              currentExecutor.addFollowUpTask(message.task, 'user');
               // Re-subscribe to events in case the previous subscription was cleaned up
               subscribeToExecutorEvents(currentExecutor);
-              const result = await currentExecutor.execute();
+              // Joins the in-flight drain if running; otherwise starts the queued turn.
+              const result = await currentExecutor.execute('user');
               logger.info('follow_up_task execution result', message.tabId, result);
             } else {
               // executor was cleaned up, can not add follow-up task
@@ -133,6 +134,11 @@ chrome.runtime.onConnect.addListener(port => {
             if (!currentExecutor) return port.postMessage({ type: 'error', error: t('bg_errors_noRunningTask') });
             await currentExecutor.cancel();
             break;
+          }
+
+          case 'run_state': {
+            const snapshot = currentExecutor?.getRunSnapshot() ?? null;
+            return port.postMessage({ type: 'run_state', snapshot });
           }
 
           case 'resume_task': {
@@ -355,7 +361,11 @@ async function subscribeToExecutorEvents(executor: Executor) {
       event.state === ExecutionState.TASK_FAIL ||
       event.state === ExecutionState.TASK_CANCEL
     ) {
-      await currentExecutor?.cleanup();
+      const snapshot = currentExecutor?.getRunSnapshot();
+      const stillActive = snapshot?.running || (snapshot?.pendingQueue.length ?? 0) > 0;
+      if (!stillActive) {
+        await currentExecutor?.cleanup();
+      }
     }
   });
 }

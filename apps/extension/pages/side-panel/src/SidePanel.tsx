@@ -38,6 +38,9 @@ const SidePanel = () => {
   const [isProcessingSpeech, setIsProcessingSpeech] = useState(false);
   const [isReplaying, setIsReplaying] = useState(false);
   const [replayEnabled, setReplayEnabled] = useState(false);
+  const [runPhase, setRunPhase] = useState<'running' | 'queued' | 'waiting' | 'error'>('waiting');
+  const [runHint, setRunHint] = useState<string | null>(null);
+  const runPhaseRef = useRef<'running' | 'queued' | 'waiting' | 'error'>('waiting');
   const sessionIdRef = useRef<string | null>(null);
   const isReplayingRef = useRef<boolean>(false);
   const portRef = useRef<chrome.runtime.Port | null>(null);
@@ -147,12 +150,36 @@ const SidePanel = () => {
     }
   }, []);
 
+  const applyRunSnapshot = useCallback((run?: AgentEvent['data']['run']) => {
+    if (!run) {
+      return;
+    }
+    setRunPhase(run.phase);
+    runPhaseRef.current = run.phase;
+    setShowStopButton(run.running);
+    if (run.running && !run.busyWithUser && run.runningTurnSource) {
+      setRunHint(t('chat_run_not_your_work', [run.runningTurnSource]));
+    } else if (run.running && run.queued) {
+      setRunHint(t('chat_run_collects_previous'));
+    } else {
+      setRunHint(null);
+    }
+    if (run.phase === 'waiting' || run.phase === 'error') {
+      setInputEnabled(true);
+    }
+    if (run.queued || run.running) {
+      setIsFollowUpMode(true);
+    }
+  }, []);
+
   const handleTaskState = useCallback(
     (event: AgentEvent) => {
       const { actor, state, timestamp, data } = event;
       const content = data?.details;
       let skip = true;
       let displayProgress = false;
+
+      applyRunSnapshot(data?.run);
 
       switch (actor) {
         case Actors.SYSTEM:
@@ -164,14 +191,18 @@ const SidePanel = () => {
             case ExecutionState.TASK_OK:
               setIsFollowUpMode(true);
               setInputEnabled(true);
-              setShowStopButton(false);
               setIsReplaying(false);
+              if (!data?.run?.queued && !data?.run?.running) {
+                setShowStopButton(false);
+              }
               break;
             case ExecutionState.TASK_FAIL:
               setIsFollowUpMode(true);
               setInputEnabled(true);
-              setShowStopButton(false);
               setIsReplaying(false);
+              if (!data?.run?.queued && !data?.run?.running) {
+                setShowStopButton(false);
+              }
               skip = false;
               break;
             case ExecutionState.TASK_CANCEL:
@@ -184,6 +215,8 @@ const SidePanel = () => {
             case ExecutionState.TASK_PAUSE:
               break;
             case ExecutionState.TASK_RESUME:
+              break;
+            case ExecutionState.RUN_UPDATE:
               break;
             default:
               console.error('Invalid task state', state);
@@ -280,7 +313,7 @@ const SidePanel = () => {
         });
       }
     },
-    [appendMessage],
+    [appendMessage, applyRunSnapshot],
   );
 
   // Stop heartbeat and close connection
@@ -443,8 +476,11 @@ const SidePanel = () => {
       sessionIdRef.current = newTaskId;
 
       // Send replay command to background
-      setInputEnabled(false);
+      setInputEnabled(true);
       setShowStopButton(true);
+      setRunPhase('running');
+      runPhaseRef.current = 'running';
+      setRunHint(t('chat_run_not_your_work', ['replay']));
 
       // Reset follow-up mode and historical session flags
       setIsFollowUpMode(false);
@@ -577,8 +613,8 @@ const SidePanel = () => {
         throw new Error('No active tab found');
       }
 
-      setInputEnabled(false);
-      setShowStopButton(true);
+      setInputEnabled(true);
+      setShowStopButton(runPhaseRef.current === 'running');
 
       // Create a new chat session for this task if not in follow-up mode
       if (!isFollowUpMode) {
@@ -609,8 +645,10 @@ const SidePanel = () => {
         setupConnection();
       }
 
-      // Send message using the utility function
-      if (isFollowUpMode) {
+      // Follow-up while running/queued: enqueue. New session only when waiting/error and not follow-up.
+      const shouldFollowUp =
+        isFollowUpMode || runPhaseRef.current === 'running' || runPhaseRef.current === 'queued';
+      if (shouldFollowUp) {
         // Send as follow-up task
         await sendMessage({
           type: 'follow_up_task',
@@ -628,6 +666,9 @@ const SidePanel = () => {
           tabId,
         });
         console.log('new_task sent', text, tabId, sessionIdRef.current);
+        setRunPhase('running');
+        runPhaseRef.current = 'running';
+        setShowStopButton(true);
       }
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
@@ -1135,6 +1176,8 @@ const SidePanel = () => {
                         isProcessingSpeech={isProcessingSpeech}
                         disabled={!inputEnabled || isHistoricalSession}
                         showStopButton={showStopButton}
+                        runPhase={runPhase}
+                        runHint={runHint}
                         setContent={setter => {
                           setInputTextRef.current = setter;
                         }}
@@ -1173,6 +1216,8 @@ const SidePanel = () => {
                       isProcessingSpeech={isProcessingSpeech}
                       disabled={!inputEnabled || isHistoricalSession}
                       showStopButton={showStopButton}
+                      runPhase={runPhase}
+                      runHint={runHint}
                       setContent={setter => {
                         setInputTextRef.current = setter;
                       }}

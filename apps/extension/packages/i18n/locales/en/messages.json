@@ -64,6 +64,30 @@
   "chat_buttons_send": {
     "message": "Send"
   },
+  "chat_run_running": {
+    "message": "Running"
+  },
+  "chat_run_queued": {
+    "message": "Queued"
+  },
+  "chat_run_waiting": {
+    "message": "Waiting"
+  },
+  "chat_run_error": {
+    "message": "Error"
+  },
+  "chat_run_not_your_work": {
+    "message": "Running ($SOURCE$) — not your turn",
+    "placeholders": {
+      "source": {
+        "content": "$1",
+        "example": "replay"
+      }
+    }
+  },
+  "chat_run_collects_previous": {
+    "message": "Queued while running — completion is the previous run"
+  },
   "chat_input_placeholder": {
     "message": "What can I help you with?"
   },

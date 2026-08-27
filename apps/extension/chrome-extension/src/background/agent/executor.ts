@@ -25,6 +25,8 @@ import { chatHistoryStore } from '@extension/storage/lib/chat';
 import type { AgentStepHistory } from './history';
 import type { GeneralSettingsConfig } from '@extension/storage';
 import { analytics } from '../services/analytics';
+import type { RunSnapshot, RunTurnSource } from './run-state';
+import { isRunning } from './run-state';
 
 const logger = createLogger('Executor');
 
@@ -43,6 +45,8 @@ export class Executor {
   private readonly navigatorPrompt: NavigatorPrompt;
   private readonly generalSettings: GeneralSettingsConfig | undefined;
   private tasks: string[] = [];
+  private executeLoop: Promise<void> | null = null;
+
   constructor(
     task: string,
     taskId: string,
@@ -87,6 +91,8 @@ export class Executor {
     this.context = context;
     // Initialize message history
     this.context.messageManager.initTaskMessages(this.navigatorPrompt.getSystemMessage(), task);
+    const initial = this.context.runSession.enqueue(task, 'user');
+    initial.preapplied = true;
   }
 
   subscribeExecutionEvents(callback: EventCallback): void {
@@ -98,13 +104,21 @@ export class Executor {
     this.context.eventManager.clearSubscribers(EventType.EXECUTION);
   }
 
-  addFollowUpTask(task: string): void {
+  addFollowUpTask(task: string, source: RunTurnSource = 'user'): void {
+    // Queue only. Work has not started — drainTurns applies it when the turn begins.
+    this.context.runSession.enqueue(task, source);
+    void this.context.emitEvent(Actors.SYSTEM, ExecutionState.RUN_UPDATE, task);
+  }
+
+  private applyFollowUp(task: string): void {
     this.tasks.push(task);
     this.context.messageManager.addNewTask(task);
-
-    // need to reset previous action results that are not included in memory
     this.context.actionResults = this.context.actionResults.filter(result => result.includeInMemory);
     this.context.keepCurrentRewrittenScriptIds.clear();
+  }
+
+  getRunSnapshot(): RunSnapshot {
+    return this.context.runSession.snapshot();
   }
 
   /**
@@ -112,7 +126,14 @@ export class Executor {
    */
   private checkTaskCompletion(planOutput: AgentOutput<PlannerOutput> | null): boolean {
     if (planOutput?.result?.done) {
-      logger.info('✅ Planner confirms task completion');
+      const collected = this.context.runSession.collectCompletion();
+      if (collected.kind === 'previous_run') {
+        logger.info(
+          '✅ Planner confirms task completion for the in-flight turn; queued work has not started (previous run)',
+        );
+      } else {
+        logger.info('✅ Planner confirms task completion');
+      }
       if (planOutput.result.final_answer) {
         this.context.finalAnswer = planOutput.result.final_answer;
       }
@@ -122,11 +143,69 @@ export class Executor {
   }
 
   /**
-   * Execute the task
-   *
-   * @returns {Promise<void>}
+   * Execute the task. Joins an in-flight loop if one is already draining
+   * queued turns. Follow-ups submitted while running stay queued until the
+   * current turn completes (completion of that turn is the previous run).
    */
-  async execute(): Promise<void> {
+  async execute(source: RunTurnSource = 'user'): Promise<void> {
+    if (this.executeLoop) {
+      return this.executeLoop;
+    }
+    this.executeLoop = this.drainTurns(source);
+    try {
+      await this.executeLoop;
+    } finally {
+      this.executeLoop = null;
+    }
+  }
+
+  private async drainTurns(source: RunTurnSource): Promise<void> {
+    while (!this.context.stopped) {
+      let queued = this.context.runSession.beginQueued();
+      if (!queued) {
+        if (!isRunning(this.context.runSession.getClock()) && this.tasks.length > 0) {
+          queued = {
+            id: this.context.taskId,
+            task: this.tasks[this.tasks.length - 1],
+            enqueuedAt: Date.now(),
+            source,
+            preapplied: true,
+          };
+          this.context.runSession.begin(queued);
+        } else {
+          break;
+        }
+      } else if (!queued.preapplied) {
+        this.applyFollowUp(queued.task);
+      }
+
+      await this.context.emitEvent(Actors.SYSTEM, ExecutionState.RUN_UPDATE, queued.task);
+      await this.runPlannerNavigatorLoop();
+
+      if (this.context.stopped) {
+        this.context.runSession.cancel();
+        await this.context.emitEvent(Actors.SYSTEM, ExecutionState.RUN_UPDATE, queued.task);
+        break;
+      }
+
+      if (this.context.paused) {
+        break;
+      }
+
+      if (this.context.runSession.snapshot().lastMessageIsError) {
+        break;
+      }
+
+      if (this.context.runSession.snapshot().pendingQueue.length === 0) {
+        break;
+      }
+    }
+  }
+
+  /**
+   * Run one Planner/Navigator turn to a terminal task event.
+   */
+  private async runPlannerNavigatorLoop(): Promise<void> {
     logger.info(`🚀 Executing task: ${this.tasks[this.tasks.length - 1]}`);
     // reset the step counter
     const context = this.context;
@@ -180,12 +259,14 @@ export class Executor {
       if (isCompleted) {
         // Emit final answer if available, otherwise use task ID
         const finalMessage = this.context.finalAnswer || this.context.taskId;
+        this.context.runSession.complete({ output: finalMessage });
         this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_OK, finalMessage);
 
         // Track task completion
         void analytics.trackTaskComplete(this.context.taskId);
       } else if (step >= allowedMaxSteps) {
         logger.error('❌ Task failed: Max steps reached');
+        this.context.runSession.complete({ error: true, output: t('exec_errors_maxStepsReached') });
         this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_FAIL, t('exec_errors_maxStepsReached'));
 
         // Track task failure with specific error category
@@ -193,22 +274,25 @@ export class Executor {
         const errorCategory = analytics.categorizeError(maxStepsError);
         void analytics.trackTaskFailed(this.context.taskId, errorCategory);
       } else if (this.context.stopped) {
+        this.context.runSession.cancel();
         this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_CANCEL, t('exec_task_cancel'));
 
         // Track task cancellation
         void analytics.trackTaskCancelled(this.context.taskId);
       } else {
         this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_PAUSE, t('exec_task_pause'));
-        // Note: We don't track pause as it's not a final state
+        // Note: We don't track pause as it's not a final state; the turn stays running
       }
     } catch (error) {
       if (error instanceof RequestCancelledError) {
+        this.context.runSession.cancel();
         this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_CANCEL, t('exec_task_cancel'));
 
         // Track task cancellation
         void analytics.trackTaskCancelled(this.context.taskId);
       } else {
         const errorMessage = error instanceof Error ? error.message : String(error);
+        this.context.runSession.complete({ error: true, output: errorMessage });
         this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_FAIL, t('exec_task_fail', [errorMessage]));
 
         // Track task failure with detailed error categorization
@@ -336,7 +420,9 @@ export class Executor {
   }
 
   async cancel(): Promise<void> {
+    this.context.runSession.cancel();
     this.context.stop();
+    await this.context.emitEvent(Actors.SYSTEM, ExecutionState.RUN_UPDATE, this.context.taskId);
   }
 
   async resume(): Promise<void> {
@@ -390,6 +476,13 @@ export class Executor {
         throw new Error(t('exec_replay_historyEmpty'));
       }
       logger.debug(`🔄 Replaying history: ${JSON.stringify(history, null, 2)}`);
+      this.context.runSession.cancel();
+      this.context.runSession.begin({
+        id: sessionId,
+        task: this.tasks[0],
+        enqueuedAt: Date.now(),
+        source: 'replay',
+      });
       this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_START, this.context.taskId);
 
       for (let i = 0; i < history.history.length; i++) {
@@ -420,13 +513,16 @@ export class Executor {
       }
 
       if (this.context.stopped) {
+        this.context.runSession.cancel();
         this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_CANCEL, t('exec_replay_cancel'));
       } else {
+        this.context.runSession.complete({ output: t('exec_replay_ok') });
         this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_OK, t('exec_replay_ok'));
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       replayLogger.error(`Replay failed: ${errorMessage}`);
+      this.context.runSession.complete({ error: true, output: errorMessage });
       this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_FAIL, t('exec_replay_fail', [errorMessage]));
     }
 
