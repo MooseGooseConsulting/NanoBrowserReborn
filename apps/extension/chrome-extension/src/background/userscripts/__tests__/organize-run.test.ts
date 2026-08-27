@@ -20,6 +20,8 @@ import {
   isChatGptOrganizeScript,
   ORGANIZE_DONE_TIMEOUT_MS,
   organizeActionFailure,
+  resetOrganizeTabLocksForTests,
+  runExclusiveChatGptOrganize,
   unregisterChatGptOrganize,
   waitForChatGptOrganizeDone,
   waitForOrganizeDoneInPage,
@@ -28,6 +30,7 @@ import {
 describe('chatgpt-organize action wait helpers', () => {
   afterEach(() => {
     cancelOrganizeRunInPage();
+    resetOrganizeTabLocksForTests();
     delete (globalThis as { __nanoOrganizeRun?: boolean }).__nanoOrganizeRun;
     delete (globalThis as { __nanoChatGptOrganize?: unknown }).__nanoChatGptOrganize;
     delete (globalThis as { __nanoOrganizeDeadline?: number }).__nanoOrganizeDeadline;
@@ -121,6 +124,74 @@ describe('chatgpt-organize action wait helpers', () => {
       }),
     ).toBe('/conversation/scrap-a failed: 500 Internal Server Error');
     expect(organizeActionFailure({ done: true, signedIn: true, error: null, mutations: [{ ok: true }] })).toBeNull();
+  });
+
+  it('fails closed if a second organize overlaps on the same tab without aborting the first', async () => {
+    const armCalls: number[] = [];
+    const api: UserscriptChromeApi = {
+      scripting: {
+        async registerContentScripts() {},
+        async unregisterContentScripts() {},
+        async executeScript(injection) {
+          const func = (injection as { func?: (timeoutMs: number) => void }).func;
+          const args = (injection as { args?: number[] }).args || [];
+          if (func === armOrganizeRunInPage) {
+            armCalls.push(args[0] ?? ORGANIZE_DONE_TIMEOUT_MS);
+            func(args[0] ?? ORGANIZE_DONE_TIMEOUT_MS);
+          }
+          return [];
+        },
+      },
+    };
+
+    let releaseFirst!: () => void;
+    const firstMayFinish = new Promise<void>(resolve => {
+      releaseFirst = resolve;
+    });
+    let firstArmed!: () => void;
+    const firstHasArmed = new Promise<void>(resolve => {
+      firstArmed = resolve;
+    });
+
+    const first = runExclusiveChatGptOrganize(42, async () => {
+      await armChatGptOrganizeRun(api, 42);
+      (
+        globalThis as { __nanoChatGptOrganize?: { done: boolean; listed: number } }
+      ).__nanoChatGptOrganize = { done: false, listed: 7 };
+      firstArmed();
+      await firstMayFinish;
+      return 'first-ok';
+    });
+
+    await firstHasArmed;
+    const firstController = (globalThis as { __nanoOrganizeAbort?: AbortController }).__nanoOrganizeAbort;
+    expect(firstController).toBeInstanceOf(AbortController);
+    expect(firstController?.signal.aborted).toBe(false);
+    expect(armCalls).toHaveLength(1);
+
+    await expect(
+      runExclusiveChatGptOrganize(42, async () => {
+        await armChatGptOrganizeRun(api, 42);
+        return 'second-ok';
+      }),
+    ).rejects.toThrow(/already in flight on tab 42/);
+
+    expect(armCalls).toHaveLength(1);
+    expect(firstController?.signal.aborted).toBe(false);
+    expect((globalThis as { __nanoOrganizeRun?: boolean }).__nanoOrganizeRun).toBe(true);
+    expect((globalThis as { __nanoChatGptOrganize?: { listed?: number } }).__nanoChatGptOrganize?.listed).toBe(7);
+
+    releaseFirst();
+    await expect(first).resolves.toBe('first-ok');
+    expect(firstController?.signal.aborted).toBe(false);
+  });
+
+  it('allows overlapping organize on different tabs', async () => {
+    const held = runExclusiveChatGptOrganize(1, async () => {
+      await runExclusiveChatGptOrganize(2, async () => 'other-tab');
+      return 'first-tab';
+    });
+    await expect(held).resolves.toBe('first-tab');
   });
 
   it('armChatGptOrganizeRun and waitForChatGptOrganizeDone use MAIN-world executeScript', async () => {

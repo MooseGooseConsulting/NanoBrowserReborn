@@ -37,6 +37,7 @@ import {
   executeChatGptOrganizeOnce,
   isChatGptOrganizeScript,
   organizeActionFailure,
+  runExclusiveChatGptOrganize,
   unregisterChatGptOrganize,
   waitForChatGptOrganizeDone,
 } from '@src/background/userscripts/organize-run';
@@ -736,24 +737,26 @@ export class ActionBuilder {
         const isOrganize = isChatGptOrganizeScript(scriptId);
         if (isOrganize) {
           assertChatGptOrganizeTabAllowed(tabUrl, firewall.allowedUrls, firewall.deniedUrls);
-          await armChatGptOrganizeRun(api, page.tabId);
-          try {
-            const injected = await executeChatGptOrganizeOnce(api, page.tabId);
-            const state = await waitForChatGptOrganizeDone(api, page.tabId);
-            const failure = organizeActionFailure(state);
-            if (failure) {
-              this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_FAIL, failure);
-              return new ActionResult({ error: failure, includeInMemory: true });
+          return await runExclusiveChatGptOrganize(page.tabId, async () => {
+            await armChatGptOrganizeRun(api, page.tabId);
+            try {
+              const injected = await executeChatGptOrganizeOnce(api, page.tabId);
+              const state = await waitForChatGptOrganizeDone(api, page.tabId);
+              const failure = organizeActionFailure(state);
+              if (failure) {
+                this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_FAIL, failure);
+                return new ActionResult({ error: failure, includeInMemory: true });
+              }
+              const successfulMutations = Array.isArray(state.mutations)
+                ? state.mutations.filter(item => item && item.ok !== false).length
+                : 0;
+              const msg = `${t('act_runUserscript_ok', [scriptId, injected.mode])} listed ${state.listed ?? 0} · mutations ${successfulMutations}`;
+              this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);
+              return new ActionResult({ extractedContent: msg, includeInMemory: true });
+            } finally {
+              await unregisterChatGptOrganize(api);
             }
-            const successfulMutations = Array.isArray(state.mutations)
-              ? state.mutations.filter(item => item && item.ok !== false).length
-              : 0;
-            const msg = `${t('act_runUserscript_ok', [scriptId, injected.mode])} listed ${state.listed ?? 0} · mutations ${successfulMutations}`;
-            this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);
-            return new ActionResult({ extractedContent: msg, includeInMemory: true });
-          } finally {
-            await unregisterChatGptOrganize(api);
-          }
+          });
         }
 
         const result = await registerAndRunReviewedUserscript(api, {

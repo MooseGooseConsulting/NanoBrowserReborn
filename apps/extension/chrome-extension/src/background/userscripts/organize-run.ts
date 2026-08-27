@@ -21,6 +21,9 @@ const logger = createLogger('Userscripts');
  */
 export const ORGANIZE_DONE_TIMEOUT_MS = 60_000;
 
+/** One in-flight organize per tab. A second action fails closed and does not re-arm. */
+const organizeInFlightTabs = new Set<number>();
+
 export type ChatGptOrganizeMutation = {
   ok?: boolean;
   error?: string;
@@ -118,6 +121,28 @@ export function assertChatGptOrganizeTabAllowed(
   assertUserscriptOrigin(CHATGPT_ORGANIZE_SCRIPT_ID, tabUrl);
 }
 
+export function resetOrganizeTabLocksForTests(): void {
+  organizeInFlightTabs.clear();
+}
+
+/**
+ * Fail-closed per-tab serialize in the service worker. If a run is already
+ * armed/waiting on this tab, the second action errors immediately and does
+ * not re-arm or abort the live run. Page-global abort in `armOrganizeRunInPage`
+ * only runs for the exclusive holder.
+ */
+export async function runExclusiveChatGptOrganize<T>(tabId: number, run: () => Promise<T>): Promise<T> {
+  if (organizeInFlightTabs.has(tabId)) {
+    throw new Error(`chatgpt-organize already in flight on tab ${tabId}`);
+  }
+  organizeInFlightTabs.add(tabId);
+  try {
+    return await run();
+  } finally {
+    organizeInFlightTabs.delete(tabId);
+  }
+}
+
 /** Serialized into the tab MAIN world. Do not close over module locals. */
 export function cancelOrganizeRunInPage(): void {
   const g = globalThis as OrganizePageGlobals;
@@ -129,7 +154,11 @@ export function cancelOrganizeRunInPage(): void {
   }
 }
 
-/** Serialized into the tab MAIN world. Do not close over module locals. */
+/**
+ * Serialized into the tab MAIN world. Do not close over module locals.
+ * Overlapping actions never reach this function: `runExclusiveChatGptOrganize`
+ * refuses a second claim on the same tab before arming.
+ */
 export function armOrganizeRunInPage(timeoutMs: number): void {
   const g = globalThis as OrganizePageGlobals;
   g.__nanoOrganizeRun = true;

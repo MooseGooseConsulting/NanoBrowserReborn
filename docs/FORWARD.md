@@ -12,9 +12,9 @@ Do **not** implement items 3–4 in the current PR. Do **not** open a second PR 
 
 ## The only plan
 
-1. **Previous PR** — `run_userscript` runner + fixture payload. Squash-merged to `main` as #2 (`bdbd77c`). This branch rebases onto `main`.
+1. **On main** — `run_userscript` runner + fixture payload. Squash-merged as #2 (`bdbd77c`). Not open.
 2. **This PR** — ChatGPT organize payload on that runner. Same-origin fetch. A real job. Not `click_element`.
-3. **Then** — payload rewrite / keep-current, several times a day.
+3. **Next PR after merge** — payload rewrite / keep-current, several times a day.
 4. **Later, not this week** — Hyperagent observe; Stagehand host after a real CDP 5-step; four-state completion; MCP/REST; LangGraph; marks/SAM.
 
 ## This PR (item 2)
@@ -24,6 +24,7 @@ Reviewed payload `chatgpt-organize` **organizes** scrap ChatGPT chats via same-o
 - Origin lock: `chatgpt.com` only. `chat.openai.com` 308s to chatgpt.com and does not serve `/backend-api`; www hosts are also omitted. Encoded in `REVIEWED_USERSCRIPT_HOSTS` (catalog) so `register.ts` stays untouched.
 - File lists stay keyed by `scriptId` (`filesForMode(mode, scriptId)` from PR #2). There is no module-global payload selector. The organize builder path fail-closes if the selected id and the files about to be injected disagree.
 - One-shot **executeScript only** for `chatgpt-organize` (does not `registerContentScripts`). Builder sets `__nanoOrganizeRun` in MAIN, injects, **waits for `__nanoChatGptOrganize.done`**, then unregisters leftover organize ids. Sticky content-script reruns skip. Signed-out / 401 is an **action error**. `register.ts` is not edited in this PR (`persistAcrossSessions: false` already comes from #2).
+- Background serializes organize **per tabId**. A second overlapping organize on the same tab fails closed immediately and does not re-arm or abort the in-flight run.
 - Title only. Never archive on missing JSON, empty preview, or short chats (`titleFromPreview` requires 8+ characters).
 - Fixture remains inject-proof.
 - BrowserContext allow/deny lists still apply. Matches stay origin-only.
