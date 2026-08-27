@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { COMPAT_FILE, FIXTURE_FILE, PACKAGED_MODE_FILE, USER_SCRIPTS_MODE_FILE } from '../catalog';
 import { matchesForUrl, registerAndRunReviewedUserscript, RUN_AT, WORLD, type UserscriptChromeApi } from '../register';
@@ -8,7 +11,6 @@ import { navigatorSystemPromptTemplate } from '../../agent/prompts/templates/nav
 interface CallLog {
   userRegister: unknown[];
   userUnregister: unknown[];
-  userExecute: unknown[];
   contentRegister: unknown[];
   contentUnregister: unknown[];
   executeScript: unknown[];
@@ -23,12 +25,10 @@ function eventMockChrome(options: {
   nativeUserScripts: boolean;
   packagedThrows?: boolean;
   executeThrows?: boolean;
-  userScriptsExecute?: boolean;
 }): { api: UserscriptChromeApi; calls: CallLog } {
   const calls: CallLog = {
     userRegister: [],
     userUnregister: [],
-    userExecute: [],
     contentRegister: [],
     contentUnregister: [],
     executeScript: [],
@@ -62,13 +62,6 @@ function eventMockChrome(options: {
       async unregister(value) {
         calls.userUnregister.push(value);
       },
-      ...(options.userScriptsExecute
-        ? {
-            async execute(value: unknown) {
-              calls.userExecute.push(value);
-            },
-          }
-        : {}),
     };
   }
 
@@ -133,15 +126,18 @@ describe('userscript registration helper', () => {
     });
   });
 
-  it('uses userScripts.execute when packaged registration fails and execute is available (Chrome 135+)', async () => {
+  it('clears the userScripts registration when runOnTab fails after fallback register', async () => {
     const { api, calls } = eventMockChrome({
       nativeUserScripts: true,
       packagedThrows: true,
-      userScriptsExecute: true,
+      executeThrows: true,
     });
-    await registerAndRunReviewedUserscript(api, fixtureTarget);
-    expect(calls.userExecute).toHaveLength(1);
-    expect(calls.executeScript).toHaveLength(0);
+    await expect(registerAndRunReviewedUserscript(api, fixtureTarget)).rejects.toThrow(
+      /tab closed during executeScript/,
+    );
+    expect(calls.userRegister).toHaveLength(1);
+    expect(calls.userUnregister.length).toBeGreaterThanOrEqual(2);
+    expect(calls.contentUnregister.length).toBeGreaterThanOrEqual(2);
   });
 
   it('does not fall back to userScripts when packaged registration succeeds but runOnTab fails', async () => {
@@ -264,5 +260,16 @@ describe('navigator userscript prompt', () => {
     expect(navigatorSystemPromptTemplate).toMatch(/Do NOT use run_userscript for ChatGPT organize or export/);
     expect(navigatorSystemPromptTemplate).toMatch(/That payload is not registered yet/);
     expect(navigatorSystemPromptTemplate).not.toMatch(/That job is a userscript payload/);
+  });
+});
+
+describe('fixture banner', () => {
+  it('updates an existing banner on repeated SPA runs instead of returning early', () => {
+    const fixturePath = join(dirname(fileURLToPath(import.meta.url)), '../../../../public/userscripts/fixture.user.js');
+    const source = readFileSync(fixturePath, 'utf8');
+    expect(source).toContain("document.querySelector('#nano-userscript-poc')");
+    expect(source).toContain('banner.dataset.runs = String(runs)');
+    expect(source).toContain('banner.textContent = `Nano Reborn userscript fixture loaded via');
+    expect(source).not.toMatch(/if\s*\(\s*banner\s*\)\s*return/);
   });
 });

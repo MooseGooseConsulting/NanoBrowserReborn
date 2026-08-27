@@ -14,6 +14,7 @@ Executor action `run_userscript` already registers and runs a **reviewed** fixtu
 
 - Registration matches are the current tab origin only (no ports, no `http(s)://*/*` fallback, no model `*://*/*`).
 - Fall back to `chrome.userScripts` only when packaged **registration** fails. If `runOnTab` fails after a successful packaged register, unregister and throw.
+- Immediate run always uses `chrome.scripting.executeScript`. `chrome.userScripts.execute` (Chrome 135+) is unused.
 - Require a real injectable http(s) tab URL before any persistent registration.
 - Pass existing BrowserContext allow/deny lists into the helper. Marks stay off.
 

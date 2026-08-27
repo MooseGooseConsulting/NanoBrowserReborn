@@ -31,7 +31,6 @@ export interface UserscriptChromeApi {
   userScripts?: {
     register: (scripts: unknown[]) => Promise<void>;
     unregister: (filter: { ids: string[] }) => Promise<void>;
-    execute?: (injection: unknown) => Promise<unknown>;
   };
   scripting: {
     registerContentScripts: (scripts: unknown[]) => Promise<void>;
@@ -163,23 +162,13 @@ async function clearRegistrations(
 }
 
 async function runOnTab(api: UserscriptChromeApi, tabId: number, mode: UserscriptRegistrationMode): Promise<void> {
-  const files = filesForMode(mode);
-  // chrome.userScripts.execute exists in Chrome 135+; older Chrome uses scripting.executeScript.
-  if (mode === 'chrome.userScripts' && api.userScripts?.execute) {
-    await api.userScripts.execute({
-      target: { tabId },
-      injectImmediately: true,
-      world: WORLD,
-      js: files.map(file => ({ file })),
-    });
-    return;
-  }
-
+  // Immediate inject always uses chrome.scripting.executeScript (works without Chrome 135+
+  // userScripts.execute). Registration may still use chrome.userScripts.register as fallback.
   await api.scripting.executeScript({
     target: { tabId },
     world: WORLD,
     injectImmediately: true,
-    files,
+    files: filesForMode(mode),
   });
 }
 
