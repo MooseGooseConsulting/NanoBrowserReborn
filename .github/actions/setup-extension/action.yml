@@ -1,0 +1,25 @@
+name: Setup extension workspace
+description: Node from apps/extension/.nvmrc, Corepack pnpm, frozen lockfile install
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Node
+      uses: actions/setup-node@v7
+      with:
+        node-version-file: apps/extension/.nvmrc
+        # pnpm comes from Corepack (packageManager); do not auto-cache npm.
+        package-manager-cache: false
+
+    - name: Enable Corepack
+      shell: bash
+      run: corepack enable
+
+    - name: Install
+      shell: bash
+      working-directory: apps/extension
+      env:
+        CI: true
+        HUSKY: '0'
+        COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+      run: corepack pnpm install --frozen-lockfile
