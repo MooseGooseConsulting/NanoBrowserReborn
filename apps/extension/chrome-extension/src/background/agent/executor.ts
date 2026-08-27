@@ -104,6 +104,7 @@ export class Executor {
 
     // need to reset previous action results that are not included in memory
     this.context.actionResults = this.context.actionResults.filter(result => result.includeInMemory);
+    this.context.keepCurrentRewrittenScriptIds.clear();
   }
 
   /**

@@ -438,6 +438,9 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
           }
         }
         results.push(result);
+        if (result.error) {
+          break;
+        }
 
         // check if the task is paused or stopped
         if (this.context.paused || this.context.stopped) {

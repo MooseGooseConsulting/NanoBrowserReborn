@@ -47,9 +47,10 @@ import {
   unregisterChatGptOrganize,
   waitForChatGptOrganizeDone,
 } from '@src/background/userscripts/organize-run';
-import { chromeOverlayStorage } from '@src/background/userscripts/overlay';
+import { chromeOverlayStorage, type OverlayStorageApi, type UserscriptOverlay } from '@src/background/userscripts/overlay';
 import { injectReviewedOverlay, resolveRunSource, rewriteUserscript } from '@src/background/userscripts/rewrite';
 import { isReviewedUserscriptId } from '@src/background/userscripts/catalog';
+import { buildKeepCurrentActionResult } from '@src/background/userscripts/keep-current';
 
 const logger = createLogger('Action');
 
@@ -729,6 +730,8 @@ export class ActionBuilder {
       const intent = input.intent || t('act_runUserscript_start', [scriptId]);
       this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_START, intent);
 
+      let overlayStorage: OverlayStorageApi | null = null;
+      let ranOverlay: UserscriptOverlay | null = null;
       try {
         const page = await this.context.browserContext.getCurrentPage();
         let tabUrl = page.url();
@@ -743,10 +746,13 @@ export class ActionBuilder {
 
         const firewall = this.context.browserContext.getConfig();
         const api = chrome as UserscriptChromeApi;
-        const overlay = await resolveRunSource(chromeOverlayStorage(), scriptId);
+        overlayStorage = chromeOverlayStorage();
+        ranOverlay = await resolveRunSource(overlayStorage, scriptId);
+        const overlay = ranOverlay;
         const isOrganize = isChatGptOrganizeScript(scriptId);
         if (isOrganize) {
           assertChatGptOrganizeTabAllowed(tabUrl, firewall.allowedUrls, firewall.deniedUrls);
+          const storage = overlayStorage;
           return await runExclusiveChatGptOrganize(page.tabId, async () => {
             await armChatGptOrganizeRun(api, page.tabId);
             try {
@@ -755,7 +761,17 @@ export class ActionBuilder {
               const failure = organizeActionFailure(state);
               if (failure) {
                 this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_FAIL, failure);
-                return new ActionResult({ error: failure, includeInMemory: true });
+                return new ActionResult(
+                  await buildKeepCurrentActionResult({
+                    reason: failure,
+                    scriptId,
+                    storage,
+                    alreadyRewritten: this.context.keepCurrentRewrittenScriptIds.has(scriptId),
+                    injected: overlay
+                      ? { kind: 'overlay', overlay }
+                      : { kind: 'seed' },
+                  }),
+                );
               }
               const successfulMutations = Array.isArray(state.mutations)
                 ? state.mutations.filter(item => item && item.ok !== false).length
@@ -799,6 +815,17 @@ export class ActionBuilder {
         }
         const msg = error instanceof Error ? error.message : String(error);
         this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_FAIL, msg);
+        if (isChatGptOrganizeScript(scriptId) && overlayStorage) {
+          return new ActionResult(
+            await buildKeepCurrentActionResult({
+              reason: msg,
+              scriptId,
+              storage: overlayStorage,
+              alreadyRewritten: this.context.keepCurrentRewrittenScriptIds.has(scriptId),
+              injected: ranOverlay ? { kind: 'overlay', overlay: ranOverlay } : { kind: 'seed' },
+            }),
+          );
+        }
         return new ActionResult({ error: msg, includeInMemory: true });
       }
     }, runUserscriptActionSchema);
@@ -815,6 +842,11 @@ export class ActionBuilder {
           source: input.source,
           reset: input.reset,
         });
+        if (result.reset) {
+          this.context.keepCurrentRewrittenScriptIds.delete(result.scriptId);
+        } else {
+          this.context.keepCurrentRewrittenScriptIds.add(result.scriptId);
+        }
         const msg = result.reset
           ? t('act_rewriteUserscript_reset_ok', [result.scriptId])
           : t('act_rewriteUserscript_ok', [result.scriptId, result.sourceHash || '']);
