@@ -371,7 +371,10 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
 
     const browserContext = this.context.browserContext;
     const isUserscriptOnly =
-      actions.length > 0 && actions.every(action => Object.keys(action)[0] === RUN_USERSCRIPT_ACTION);
+      actions.length > 0 &&
+      actions.every(
+        action => typeof action === 'object' && action !== null && Object.keys(action)[0] === RUN_USERSCRIPT_ACTION,
+      );
 
     // Userscript payloads inject in MAIN world; do not build set-of-marks for that action.
     let browserState: BrowserState | null = null;
@@ -383,6 +386,10 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
     }
 
     for (const [i, action] of actions.entries()) {
+      if (!action || typeof action !== 'object') {
+        logger.warning('Skipping non-object action', action);
+        continue;
+      }
       const actionName = Object.keys(action)[0];
       const actionArgs = action[actionName];
       try {

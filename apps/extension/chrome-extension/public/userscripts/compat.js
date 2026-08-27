@@ -10,6 +10,18 @@
       return fallback;
     }
   };
-  globalThis.GM_setValue = (key, value) => localStorage.setItem(prefix + key, JSON.stringify(value));
-  globalThis.GM_deleteValue = key => localStorage.removeItem(prefix + key);
+  globalThis.GM_setValue = (key, value) => {
+    try {
+      localStorage.setItem(prefix + key, JSON.stringify(value));
+    } catch {
+      // quota or unserializable value
+    }
+  };
+  globalThis.GM_deleteValue = key => {
+    try {
+      localStorage.removeItem(prefix + key);
+    } catch {
+      // storage unavailable
+    }
+  };
 })();

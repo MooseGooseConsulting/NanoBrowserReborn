@@ -1,5 +1,6 @@
 import { isUrlAllowed } from '@src/background/browser/util';
 import { URLNotAllowedError } from '@src/background/browser/views';
+import { createLogger } from '@src/background/log';
 import {
   contentScriptIdFor,
   filesForMode,
@@ -15,7 +16,13 @@ import {
  * tree is historical vanilla JS outside the extension tsconfig/vite graph. This module
  * is a TypeScript port (packaged registerContentScripts first, userScripts fallback)
  * rather than a cross-import from drop/.
+ *
+ * Matches are origin-scoped (no ports, no all-sites fallback). Fallback to
+ * chrome.userScripts happens only when packaged *registration* fails — not when
+ * immediate runOnTab fails after a successful register.
  */
+
+const logger = createLogger('Userscripts');
 
 export const RUN_AT = 'document_end' as const;
 export const WORLD = 'MAIN' as const;
@@ -38,6 +45,8 @@ export interface RegisterAndRunOptions {
   tabId: number;
   tabUrl: string;
   matches?: string[];
+  allowList?: string[];
+  denyList?: string[];
 }
 
 export interface RegisterAndRunResult {
@@ -52,36 +61,86 @@ export interface RegisterAndRunResult {
   packagedError?: string;
 }
 
-export function isInjectableUrl(url: string): boolean {
-  return isUrlAllowed(url, [], []);
+export function isInjectableHttpUrl(url: string, allowList: string[] = [], denyList: string[] = []): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+  return isUrlAllowed(url, allowList, denyList);
+}
+
+/** @deprecated use isInjectableHttpUrl — kept for call sites that still import the old name */
+export function isInjectableUrl(url: string, allowList: string[] = [], denyList: string[] = []): boolean {
+  return isInjectableHttpUrl(url, allowList, denyList);
+}
+
+export function originMatchPattern(url: string): string {
+  const parsed = new URL(url);
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new URLNotAllowedError(`URL: ${url} is not allowed`);
+  }
+  return `${parsed.protocol}//${parsed.hostname}/*`;
 }
 
 export function matchesForUrl(url: string): string[] {
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
-      return [`${parsed.origin}/*`];
-    }
-  } catch {
-    // fall through to broad http(s) matches
-  }
-  return ['http://*/*', 'https://*/*'];
+  return [originMatchPattern(url)];
 }
 
-export function assertMatchesSafe(matches: string[]): void {
-  for (const pattern of matches) {
-    const lower = pattern.trim().toLowerCase();
-    if (
-      lower.startsWith('chrome://') ||
-      lower.startsWith('chrome-extension://') ||
-      lower.startsWith('javascript:') ||
-      lower.startsWith('data:') ||
-      lower.startsWith('file:') ||
-      lower.startsWith('vbscript:')
-    ) {
+export function isSameOriginMatchPattern(pattern: string, tabUrl: string): boolean {
+  let parsedTab: URL;
+  try {
+    parsedTab = new URL(tabUrl);
+  } catch {
+    return false;
+  }
+  if (parsedTab.protocol !== 'http:' && parsedTab.protocol !== 'https:') {
+    return false;
+  }
+  const host = parsedTab.hostname;
+  const originPrefix = `${parsedTab.protocol}//${host}/`;
+  const trimmed = pattern.trim();
+  if (trimmed === `${parsedTab.protocol}//${host}/*`) {
+    return true;
+  }
+  return trimmed.startsWith(originPrefix) && !trimmed.includes('://*') && !trimmed.startsWith('*://');
+}
+
+function representativeUrlFromMatch(pattern: string): string | null {
+  const match = pattern.trim().match(/^(https?):\/\/([^*/]+)(\/.*)?$/i);
+  if (!match) {
+    return null;
+  }
+  return `${match[1].toLowerCase()}://${match[2]}/`;
+}
+
+export function resolveRegistrationMatches(
+  tabUrl: string,
+  requested: string[] | undefined,
+  allowList: string[] = [],
+  denyList: string[] = [],
+): string[] {
+  if (!isInjectableHttpUrl(tabUrl, allowList, denyList)) {
+    throw new URLNotAllowedError(`URL: ${tabUrl} is not allowed`);
+  }
+
+  const originOnly = matchesForUrl(tabUrl);
+  const candidates = requested?.length ? requested : originOnly;
+
+  for (const pattern of candidates) {
+    if (!isSameOriginMatchPattern(pattern, tabUrl)) {
+      throw new URLNotAllowedError(`Match pattern is not a same-origin subset of the current tab: ${pattern}`);
+    }
+    const representative = representativeUrlFromMatch(pattern);
+    if (!representative || !isUrlAllowed(representative, allowList, denyList)) {
       throw new URLNotAllowedError(`Match pattern is not allowed: ${pattern}`);
     }
   }
+
+  return candidates;
 }
 
 async function clearRegistrations(
@@ -93,18 +152,19 @@ async function clearRegistrations(
     if (api.userScripts) {
       await api.userScripts.unregister({ ids: [userScriptId] });
     }
-  } catch {
-    // already unregistered
+  } catch (error) {
+    logger.warning('unregister userScripts failed', error);
   }
   try {
     await api.scripting.unregisterContentScripts({ ids: [contentScriptId] });
-  } catch {
-    // already unregistered
+  } catch (error) {
+    logger.warning('unregisterContentScripts failed', error);
   }
 }
 
 async function runOnTab(api: UserscriptChromeApi, tabId: number, mode: UserscriptRegistrationMode): Promise<void> {
   const files = filesForMode(mode);
+  // chrome.userScripts.execute exists in Chrome 135+; older Chrome uses scripting.executeScript.
   if (mode === 'chrome.userScripts' && api.userScripts?.execute) {
     await api.userScripts.execute({
       target: { tabId },
@@ -123,26 +183,44 @@ async function runOnTab(api: UserscriptChromeApi, tabId: number, mode: Userscrip
   });
 }
 
+function successResult(
+  options: RegisterAndRunOptions,
+  mode: UserscriptRegistrationMode,
+  matches: string[],
+  packagedError?: string,
+): RegisterAndRunResult {
+  return {
+    ok: true,
+    mode,
+    scriptId: options.scriptId,
+    contentScriptId: contentScriptIdFor(options.scriptId),
+    userScriptId: userScriptIdFor(options.scriptId),
+    matches,
+    js: filesForMode(mode),
+    ran: true,
+    packagedError,
+  };
+}
+
 export async function registerAndRunReviewedUserscript(
   api: UserscriptChromeApi,
   options: RegisterAndRunOptions,
 ): Promise<RegisterAndRunResult> {
   const { scriptId, tabId, tabUrl } = options;
+  const allowList = options.allowList ?? [];
+  const denyList = options.denyList ?? [];
+
   if (!isReviewedUserscriptId(scriptId)) {
     throw new Error(`Unknown reviewed userscript id: ${scriptId}`);
   }
-  if (!isInjectableUrl(tabUrl)) {
-    throw new URLNotAllowedError(`URL: ${tabUrl} is not allowed`);
-  }
 
-  const matches = options.matches?.length ? options.matches : matchesForUrl(tabUrl);
-  assertMatchesSafe(matches);
-
+  const matches = resolveRegistrationMatches(tabUrl, options.matches, allowList, denyList);
   const contentScriptId = contentScriptIdFor(scriptId);
   const userScriptId = userScriptIdFor(scriptId);
   await clearRegistrations(api, contentScriptId, userScriptId);
 
   let packagedError: string | undefined;
+  let packagedRegistered = false;
   try {
     await api.scripting.registerContentScripts([
       {
@@ -154,20 +232,19 @@ export async function registerAndRunReviewedUserscript(
         js: filesForMode('chrome.scripting.registerContentScripts'),
       },
     ]);
-    const mode: UserscriptRegistrationMode = 'chrome.scripting.registerContentScripts';
-    await runOnTab(api, tabId, mode);
-    return {
-      ok: true,
-      mode,
-      scriptId,
-      contentScriptId,
-      userScriptId,
-      matches,
-      js: filesForMode(mode),
-      ran: true,
-    };
+    packagedRegistered = true;
   } catch (error) {
     packagedError = String(error instanceof Error ? error.message : error);
+  }
+
+  if (packagedRegistered) {
+    try {
+      await runOnTab(api, tabId, 'chrome.scripting.registerContentScripts');
+      return successResult(options, 'chrome.scripting.registerContentScripts', matches);
+    } catch (error) {
+      await clearRegistrations(api, contentScriptId, userScriptId);
+      throw error;
+    }
   }
 
   if (!api.userScripts) {
@@ -185,17 +262,12 @@ export async function registerAndRunReviewedUserscript(
       js: filesForMode('chrome.userScripts').map(file => ({ file })),
     },
   ]);
-  const mode: UserscriptRegistrationMode = 'chrome.userScripts';
-  await runOnTab(api, tabId, mode);
-  return {
-    ok: true,
-    mode,
-    scriptId,
-    contentScriptId,
-    userScriptId,
-    matches,
-    js: filesForMode(mode),
-    ran: true,
-    packagedError,
-  };
+
+  try {
+    await runOnTab(api, tabId, 'chrome.userScripts');
+    return successResult(options, 'chrome.userScripts', matches, packagedError);
+  } catch (error) {
+    await clearRegistrations(api, contentScriptId, userScriptId);
+    throw error;
+  }
 }

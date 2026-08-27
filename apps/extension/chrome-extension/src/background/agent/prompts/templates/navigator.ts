@@ -93,9 +93,9 @@ Common action sequences:
 
 10. Userscript payloads:
 
-- Reviewed userscripts are harness PAYLOADS. Use run_userscript to inject and run a reviewed packaged script in the page MAIN world.
-- Do NOT use click_element to organize or export ChatGPT chats. That job is a userscript payload (same-origin fetch), not marks.
-- script_id "fixture" is the inject-proof banner/counter. ChatGPT export body is not in this slice.
+- Reviewed userscripts are harness PAYLOADS. The only registered payload in this slice is script_id "fixture" (banner/counter inject proof). Use run_userscript only for that inject-proof.
+- Do NOT use run_userscript for ChatGPT organize or export. That payload is not registered yet. Fixture injection does not complete those tasks.
+- Do NOT use click_element to organize or export ChatGPT chats.
 
 11. Extraction:
 

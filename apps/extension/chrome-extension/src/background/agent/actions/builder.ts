@@ -710,16 +710,25 @@ export class ActionBuilder {
       const intent = input.intent || t('act_runUserscript_start', [scriptId]);
       this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_START, intent);
 
-      const page = await this.context.browserContext.getCurrentPage();
-      const tab = await chrome.tabs.get(page.tabId);
-      const tabUrl = tab.url || page.url();
-
       try {
+        const page = await this.context.browserContext.getCurrentPage();
+        let tabUrl = page.url();
+        try {
+          const tab = await chrome.tabs.get(page.tabId);
+          tabUrl = tab.url || tabUrl;
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_FAIL, msg);
+          return new ActionResult({ error: msg, includeInMemory: true });
+        }
+
+        const firewall = this.context.browserContext.getConfig();
         const result = await registerAndRunReviewedUserscript(chrome as UserscriptChromeApi, {
           scriptId,
           tabId: page.tabId,
           tabUrl,
-          matches: input.matches,
+          allowList: firewall.allowedUrls,
+          denyList: firewall.deniedUrls,
         });
         const msg = t('act_runUserscript_ok', [scriptId, result.mode]);
         this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);

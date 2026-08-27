@@ -8,14 +8,16 @@ Set-of-marks is **optional**. Do not rebuild `buildDomTree` / `highlightIndex`. 
 
 Work in `apps/extension` (and later `apps/stagehand-host`). `vendor/` is frozen.
 
-## This slice: userscript payload lane
+## This slice: harden the userscript registration helper
 
-The next validate-able slice is Executor action `run_userscript`: register and run a **reviewed** payload.
+Executor action `run_userscript` already registers and runs a **reviewed** fixture payload. This slice hardens that helper:
 
-- Prefer packaged `chrome.scripting.registerContentScripts` (MAIN world, `document_end`).
-- Fall back to `chrome.userScripts` when the packaged path fails and that API is available.
-- Fixture banner/counter is enough to prove inject. Do **not** implement ChatGPT export/scrape in this slice.
-- Marks stay off for this action (`doMultiAction` must not call `getState` / highlight for a userscript-only step).
+- Registration matches are the current tab origin only (no ports, no `http(s)://*/*` fallback, no model `*://*/*`).
+- Fall back to `chrome.userScripts` only when packaged **registration** fails. If `runOnTab` fails after a successful packaged register, unregister and throw.
+- Require a real injectable http(s) tab URL before any persistent registration.
+- Pass existing BrowserContext allow/deny lists into the helper. Marks stay off.
+
+Fixture banner/counter remains the only payload. Do **not** implement ChatGPT export/scrape in this slice.
 
 ## Next slice
 
@@ -50,7 +52,7 @@ Load `dist` unpacked. Confirm side panel opens. Characterization: Navigator is r
 pnpm -F chrome-extension test
 ```
 
-Must cover packaged `registerContentScripts` first, `chrome.userScripts` fallback, MAIN world, `document_end`, file order, and injection-safety URL blocks. No ChatGPT login.
+Must cover packaged `registerContentScripts` first, `chrome.userScripts` fallback only after registration failure, origin-only matches (no model `*://*/*`, no all-sites fallback, portless patterns), MAIN world, `document_end`, and injection-safety URL blocks. No ChatGPT login. Navigator prompt must not claim ChatGPT organize/export is a registered payload.
 
 POC under `drop/chatgpt-exporter-test/nanobrowser-poc` remains historical proof (`node unit_service_worker.mjs`). The live helper is a TypeScript port in `apps/extension` because the extension module graph does not import `drop/`.
 

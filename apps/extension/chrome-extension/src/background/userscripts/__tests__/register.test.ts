@@ -3,6 +3,7 @@ import { COMPAT_FILE, FIXTURE_FILE, PACKAGED_MODE_FILE, USER_SCRIPTS_MODE_FILE }
 import { matchesForUrl, registerAndRunReviewedUserscript, RUN_AT, WORLD, type UserscriptChromeApi } from '../register';
 import { URLNotAllowedError } from '@src/background/browser/views';
 import { RUN_USERSCRIPT_ACTION, runUserscriptActionSchema } from '../../agent/actions/schemas';
+import { navigatorSystemPromptTemplate } from '../../agent/prompts/templates/navigator';
 
 interface CallLog {
   userRegister: unknown[];
@@ -21,6 +22,7 @@ function firstScript(value: unknown): Record<string, unknown> {
 function eventMockChrome(options: {
   nativeUserScripts: boolean;
   packagedThrows?: boolean;
+  executeThrows?: boolean;
   userScriptsExecute?: boolean;
 }): { api: UserscriptChromeApi; calls: CallLog } {
   const calls: CallLog = {
@@ -45,6 +47,9 @@ function eventMockChrome(options: {
       },
       async executeScript(value) {
         calls.executeScript.push(value);
+        if (options.executeThrows) {
+          throw new Error('tab closed during executeScript');
+        }
       },
     },
   };
@@ -90,10 +95,12 @@ describe('userscript registration helper', () => {
       runAt: string;
       persistAcrossSessions: boolean;
       js: string[];
+      matches: string[];
     };
     expect(registered.world).toBe(WORLD);
     expect(registered.runAt).toBe(RUN_AT);
     expect(registered.persistAcrossSessions).toBe(true);
+    expect(registered.matches).toEqual(['https://example.com/*']);
     expect(registered.js).toEqual([PACKAGED_MODE_FILE, COMPAT_FILE, FIXTURE_FILE]);
     expect(calls.executeScript).toHaveLength(1);
     expect(calls.executeScript[0]).toMatchObject({
@@ -126,7 +133,7 @@ describe('userscript registration helper', () => {
     });
   });
 
-  it('uses userScripts.execute when packaged fails and execute is available', async () => {
+  it('uses userScripts.execute when packaged registration fails and execute is available (Chrome 135+)', async () => {
     const { api, calls } = eventMockChrome({
       nativeUserScripts: true,
       packagedThrows: true,
@@ -135,6 +142,19 @@ describe('userscript registration helper', () => {
     await registerAndRunReviewedUserscript(api, fixtureTarget);
     expect(calls.userExecute).toHaveLength(1);
     expect(calls.executeScript).toHaveLength(0);
+  });
+
+  it('does not fall back to userScripts when packaged registration succeeds but runOnTab fails', async () => {
+    const { api, calls } = eventMockChrome({
+      nativeUserScripts: true,
+      executeThrows: true,
+    });
+    await expect(registerAndRunReviewedUserscript(api, fixtureTarget)).rejects.toThrow(
+      /tab closed during executeScript/,
+    );
+    expect(calls.contentRegister).toHaveLength(1);
+    expect(calls.userRegister).toHaveLength(0);
+    expect(calls.contentUnregister.length).toBeGreaterThanOrEqual(2);
   });
 
   it('throws when packaged registration fails and userScripts is missing', async () => {
@@ -159,6 +179,49 @@ describe('userscript registration helper', () => {
     expect(calls.contentRegister).toHaveLength(0);
     expect(calls.userRegister).toHaveLength(0);
     expect(calls.executeScript).toHaveLength(0);
+  });
+
+  it('rejects about:blank and ftp before any registration (no all-sites fallback)', async () => {
+    const { api, calls } = eventMockChrome({ nativeUserScripts: true });
+    await expect(
+      registerAndRunReviewedUserscript(api, { ...fixtureTarget, tabUrl: 'about:blank' }),
+    ).rejects.toBeInstanceOf(URLNotAllowedError);
+    await expect(
+      registerAndRunReviewedUserscript(api, { ...fixtureTarget, tabUrl: 'ftp://files.example/dir' }),
+    ).rejects.toBeInstanceOf(URLNotAllowedError);
+    expect(calls.contentRegister).toHaveLength(0);
+    expect(() => matchesForUrl('about:blank')).toThrow(URLNotAllowedError);
+  });
+
+  it('rejects model-wide match globs and keeps origin-only registration', async () => {
+    const { api, calls } = eventMockChrome({ nativeUserScripts: true });
+    await expect(
+      registerAndRunReviewedUserscript(api, { ...fixtureTarget, matches: ['*://*/*'] }),
+    ).rejects.toBeInstanceOf(URLNotAllowedError);
+    await expect(
+      registerAndRunReviewedUserscript(api, { ...fixtureTarget, matches: ['https://*/*'] }),
+    ).rejects.toBeInstanceOf(URLNotAllowedError);
+    expect(calls.contentRegister).toHaveLength(0);
+
+    const ok = await registerAndRunReviewedUserscript(api, fixtureTarget);
+    expect(ok.matches).toEqual(['https://example.com/*']);
+    expect(firstScript(calls.contentRegister[0]).matches).toEqual(['https://example.com/*']);
+  });
+
+  it('strips ports from match patterns', () => {
+    expect(matchesForUrl('http://localhost:3000/app')).toEqual(['http://localhost/*']);
+    expect(matchesForUrl('https://example.com:8443/chat')).toEqual(['https://example.com/*']);
+  });
+
+  it('applies existing firewall allow/deny lists to the tab URL', async () => {
+    const { api, calls } = eventMockChrome({ nativeUserScripts: true });
+    await expect(
+      registerAndRunReviewedUserscript(api, {
+        ...fixtureTarget,
+        denyList: ['example.com'],
+      }),
+    ).rejects.toBeInstanceOf(URLNotAllowedError);
+    expect(calls.contentRegister).toHaveLength(0);
   });
 
   it('rejects unknown script ids without touching Chrome APIs', async () => {
@@ -186,9 +249,20 @@ describe('userscript registration helper', () => {
 });
 
 describe('run_userscript action schema', () => {
-  it('defaults script_id to fixture', () => {
+  it('defaults script_id to fixture and does not accept model matches', () => {
     expect(RUN_USERSCRIPT_ACTION).toBe('run_userscript');
     const parsed = runUserscriptActionSchema.schema.parse({ intent: 'inject proof' });
     expect(parsed).toMatchObject({ intent: 'inject proof', script_id: 'fixture' });
+    expect(parsed).not.toHaveProperty('matches');
+    expect(runUserscriptActionSchema.schema.parse({ intent: 'x', matches: ['*://*/*'] })).not.toHaveProperty('matches');
+  });
+});
+
+describe('navigator userscript prompt', () => {
+  it('does not claim ChatGPT organize/export is a registered userscript payload', () => {
+    expect(navigatorSystemPromptTemplate).toContain('script_id "fixture"');
+    expect(navigatorSystemPromptTemplate).toMatch(/Do NOT use run_userscript for ChatGPT organize or export/);
+    expect(navigatorSystemPromptTemplate).toMatch(/That payload is not registered yet/);
+    expect(navigatorSystemPromptTemplate).not.toMatch(/That job is a userscript payload/);
   });
 });
