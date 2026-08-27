@@ -228,6 +228,10 @@ export function clearQueue(clock: RunClock): void {
   clock.pendingQueue = [];
 }
 
+export function discardPreappliedQueue(clock: RunClock): void {
+  clock.pendingQueue = clock.pendingQueue.filter(item => !item.preapplied);
+}
+
 export class RunSession {
   private readonly clock: RunClock;
 
@@ -264,6 +268,10 @@ export class RunSession {
     if (isRunning(this.clock)) {
       completeTurn(this.clock, { error: false, output: null, now });
     }
+  }
+
+  discardPreappliedQueue(): void {
+    discardPreappliedQueue(this.clock);
   }
 
   phase(): RunPhase {

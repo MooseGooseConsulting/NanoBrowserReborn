@@ -503,7 +503,9 @@ export class Executor {
         throw new Error(t('exec_replay_historyEmpty'));
       }
       logger.debug(`🔄 Replaying history: ${JSON.stringify(history, null, 2)}`);
-      this.context.runSession.cancel();
+      // The constructor queues a synthetic preapplied task for ordinary execution.
+      // Keep real follow-ups that arrived while replay history was loading.
+      this.context.runSession.discardPreappliedQueue();
       this.context.runSession.begin({
         id: sessionId,
         task: this.tasks[0],

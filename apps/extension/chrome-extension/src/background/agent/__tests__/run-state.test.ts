@@ -149,6 +149,17 @@ describe('trap: queued while running collects the previous run', () => {
     expect(deriveRunPhase(clock)).toBe('running');
   });
 
+  it('drops only the synthetic initial task when replay begins and retains queued follow-ups', () => {
+    const session = new RunSession();
+    const initial = session.enqueue('replay placeholder', 'user', 100);
+    initial.preapplied = true;
+    const followUp = session.enqueue('send while replay starts', 'user', 101);
+
+    session.discardPreappliedQueue();
+
+    expect(session.snapshot().pendingQueue.map(item => item.id)).toEqual([followUp.id]);
+  });
+
   it('reports error rather than queued when the last turn failed with work still pending', () => {
     const clock = createRunClock();
     const failed = enqueueRun(clock, 'failing', 'user', 100);

@@ -43,8 +43,11 @@ const SidePanel = () => {
   const runPhaseRef = useRef<'running' | 'queued' | 'waiting' | 'error'>('waiting');
   const sessionIdRef = useRef<string | null>(null);
   const isReplayingRef = useRef<boolean>(false);
+  const replayPreparingRef = useRef(false);
   const dispatchLockRef = useRef(false);
   const portRef = useRef<chrome.runtime.Port | null>(null);
+  const runStateSyncRef = useRef<Promise<void> | null>(null);
+  const resolveRunStateSyncRef = useRef<(() => void) | null>(null);
   const heartbeatIntervalRef = useRef<number | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const setInputTextRef = useRef<((text: string) => void) | null>(null);
@@ -178,6 +181,65 @@ const SidePanel = () => {
       dispatchLockRef.current = false;
     }
   }, []);
+
+  const resetRunState = useCallback(() => {
+    setRunPhase('waiting');
+    runPhaseRef.current = 'waiting';
+    setRunHint(null);
+    setShowStopButton(false);
+    setIsFollowUpMode(false);
+    dispatchLockRef.current = false;
+  }, []);
+
+  const settleRunStateSync = useCallback(() => {
+    resolveRunStateSyncRef.current?.();
+    resolveRunStateSyncRef.current = null;
+    runStateSyncRef.current = null;
+  }, []);
+
+  const applyPortRunSnapshot = useCallback(
+    (snapshot: any) => {
+      if (!snapshot) {
+        resetRunState();
+        return;
+      }
+      applyRunSnapshot({
+        phase: snapshot.phase,
+        running: snapshot.running,
+        queued: snapshot.queued,
+        runningTurnSource: snapshot.runningTurnSource,
+        runningTurnId: snapshot.runningTurnId,
+        pendingCount: snapshot.pendingQueue?.length ?? 0,
+        lastRunMessageRole: snapshot.lastRunMessageRole,
+        lastMessageIsError: snapshot.lastMessageIsError,
+        lastCompletedTurnId: snapshot.lastCompletedTurnId,
+        lastCompletedOutput: snapshot.lastCompletedOutput,
+        lastCompletedSource: snapshot.lastCompletedSource,
+        busyWithUser: snapshot.running && snapshot.runningTurnSource === 'user',
+        completionKind: snapshot.queued && snapshot.running ? 'previous_run' : snapshot.running ? 'in_flight' : 'idle',
+      });
+    },
+    [applyRunSnapshot, resetRunState],
+  );
+
+  const requestRunState = useCallback((): Promise<void> => {
+    const port = portRef.current;
+    if (!port) {
+      return Promise.reject(new Error('No valid connection available'));
+    }
+    if (!runStateSyncRef.current) {
+      runStateSyncRef.current = new Promise(resolve => {
+        resolveRunStateSyncRef.current = resolve;
+      });
+      try {
+        port.postMessage({ type: 'run_state' });
+      } catch (error) {
+        settleRunStateSync();
+        return Promise.reject(error);
+      }
+    }
+    return runStateSyncRef.current;
+  }, [settleRunStateSync]);
 
   const handleTaskState = useCallback(
     (event: AgentEvent) => {
@@ -352,36 +414,32 @@ const SidePanel = () => {
           handleTaskState(message);
         } else if (message && message.type === 'error') {
           // Handle error messages from service worker
+          replayPreparingRef.current = false;
           appendMessage({
             actor: Actors.SYSTEM,
             content: message.error || t('errors_unknown'),
             timestamp: Date.now(),
           });
-          setInputEnabled(true);
-          setShowStopButton(false);
-          dispatchLockRef.current = false;
-          runPhaseRef.current = 'waiting';
-          setRunPhase('waiting');
-          setRunHint(null);
-        } else if (message && message.type === 'run_state') {
-          const snapshot = message.snapshot;
-          if (snapshot) {
-            applyRunSnapshot({
-              phase: snapshot.phase,
-              running: snapshot.running,
-              queued: snapshot.queued,
-              runningTurnSource: snapshot.runningTurnSource,
-              runningTurnId: snapshot.runningTurnId,
-              pendingCount: snapshot.pendingQueue?.length ?? 0,
-              lastRunMessageRole: snapshot.lastRunMessageRole,
-              lastMessageIsError: snapshot.lastMessageIsError,
-              lastCompletedTurnId: snapshot.lastCompletedTurnId,
-              lastCompletedOutput: snapshot.lastCompletedOutput,
-              lastCompletedSource: snapshot.lastCompletedSource,
-              busyWithUser: snapshot.running && snapshot.runningTurnSource === 'user',
-              completionKind: snapshot.queued && snapshot.running ? 'previous_run' : snapshot.running ? 'in_flight' : 'idle',
-            });
+          if (message.snapshot) {
+            applyPortRunSnapshot(message.snapshot);
+            settleRunStateSync();
+            return;
           }
+          setInputEnabled(true);
+          resetRunState();
+        } else if (message && message.type === 'run_state') {
+          if (!replayPreparingRef.current) {
+            applyPortRunSnapshot(message.snapshot);
+          }
+          settleRunStateSync();
+        } else if (message && message.type === 'replay_ready') {
+          applyPortRunSnapshot(message.snapshot);
+          replayPreparingRef.current = false;
+          setInputEnabled(true);
+          setIsFollowUpMode(true);
+          dispatchLockRef.current = true;
+          setIsReplaying(true);
+          settleRunStateSync();
         } else if (message && message.type === 'speech_to_text_result') {
           // Handle speech-to-text result
           if (message.text && setInputTextRef.current) {
@@ -409,8 +467,10 @@ const SidePanel = () => {
           clearInterval(heartbeatIntervalRef.current);
           heartbeatIntervalRef.current = null;
         }
+        replayPreparingRef.current = false;
         setInputEnabled(true);
-        setShowStopButton(false);
+        resetRunState();
+        settleRunStateSync();
       });
 
       // Setup heartbeat interval
@@ -431,11 +491,9 @@ const SidePanel = () => {
         }
       }, 25000);
 
-      try {
-        portRef.current.postMessage({ type: 'run_state' });
-      } catch (error) {
+      requestRunState().catch(error => {
         console.error('Failed to request run_state:', error);
-      }
+      });
     } catch (error) {
       console.error('Failed to establish connection:', error);
       appendMessage({
@@ -446,7 +504,7 @@ const SidePanel = () => {
       // Clear any references since connection failed
       portRef.current = null;
     }
-  }, [handleTaskState, appendMessage, stopConnection, applyRunSnapshot]);
+  }, [handleTaskState, appendMessage, stopConnection, applyPortRunSnapshot, resetRunState, requestRunState, settleRunStateSync]);
 
   // Add safety check for message sending
   const sendMessage = useCallback(
@@ -512,10 +570,13 @@ const SidePanel = () => {
       sessionIdRef.current = newTaskId;
 
       // Send replay command to background
-      setInputEnabled(true);
-      setShowStopButton(true);
-      setRunPhase('running');
-      runPhaseRef.current = 'running';
+      // Keep input disabled until the background owns the new replay executor.
+      // `replay_ready` then enables follow-ups against that exact executor.
+      replayPreparingRef.current = true;
+      setInputEnabled(false);
+      setShowStopButton(false);
+      setRunPhase('queued');
+      runPhaseRef.current = 'queued';
       setRunHint(t('chat_run_not_your_work', ['replay']));
 
       // Reset follow-up mode and historical session flags
@@ -552,6 +613,7 @@ const SidePanel = () => {
       });
       setIsReplaying(true);
     } catch (err) {
+      replayPreparingRef.current = false;
       const errorMessage = err instanceof Error ? err.message : String(err);
       appendMessage({
         actor: Actors.SYSTEM,
@@ -643,6 +705,13 @@ const SidePanel = () => {
     }
 
     try {
+      // A reconnect must learn the background-owned executor before deciding
+      // whether this message starts a new session or follows up an active run.
+      if (!portRef.current) {
+        setupConnection();
+      }
+      await requestRunState();
+
       const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
       const tabId = tabs[0]?.id;
       if (!tabId) {
@@ -686,11 +755,6 @@ const SidePanel = () => {
 
       // Pass the sessionId directly to appendMessage
       appendMessage(userMessage, sessionIdRef.current);
-
-      // Setup connection if not exists
-      if (!portRef.current) {
-        setupConnection();
-      }
 
       dispatchLockRef.current = true;
       if (!shouldFollowUp) {

@@ -485,6 +485,9 @@
   "bg_cmd_newTask_noTask": {
     "message": "No task provided"
   },
+  "bg_cmd_newTask_active": {
+    "message": "A task is already active; send a follow-up instead"
+  },
   "bg_cmd_followUpTask_noTask": {
     "message": "No follow up task provided"
   },

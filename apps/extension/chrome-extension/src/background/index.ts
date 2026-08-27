@@ -99,6 +99,15 @@ chrome.runtime.onConnect.addListener(port => {
             if (!message.task) return port.postMessage({ type: 'error', error: t('bg_cmd_newTask_noTask') });
             if (!message.tabId) return port.postMessage({ type: 'error', error: t('bg_errors_noTabId') });
 
+            const activeSnapshot = currentExecutor?.getRunSnapshot();
+            if (activeSnapshot && (activeSnapshot.running || activeSnapshot.pendingQueue.length > 0)) {
+              return port.postMessage({
+                type: 'error',
+                error: t('bg_cmd_newTask_active'),
+                snapshot: activeSnapshot,
+              });
+            }
+
             logger.info('new_task', message.tabId, message.task);
             currentExecutor = await setupExecutor(message.taskId, message.task, browserContext);
             subscribeToExecutorEvents(currentExecutor);
@@ -236,6 +245,7 @@ chrome.runtime.onConnect.addListener(port => {
               // Setup executor with the new taskId and a dummy task description
               currentExecutor = await setupExecutor(message.taskId, message.task, browserContext);
               subscribeToExecutorEvents(currentExecutor);
+              port.postMessage({ type: 'replay_ready', snapshot: currentExecutor.getRunSnapshot() });
 
               // Run replayHistory with the history session ID
               const result = await currentExecutor.replayHistory(message.historySessionId);

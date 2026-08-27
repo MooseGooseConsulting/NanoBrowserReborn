@@ -478,6 +478,9 @@
   "bg_cmd_newTask_noTask": {
     "message": "未提供任務"
   },
+  "bg_cmd_newTask_active": {
+    "message": "已有執行中的任務；請改為傳送後續任務"
+  },
   "bg_cmd_followUpTask_noTask": {
     "message": "未提供後續任務"
   },

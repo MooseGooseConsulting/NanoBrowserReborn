@@ -484,6 +484,9 @@
   "bg_cmd_newTask_noTask": {
     "message": "Nenhuma tarefa fornecida"
   },
+  "bg_cmd_newTask_active": {
+    "message": "Já há uma tarefa ativa; envie uma tarefa de acompanhamento"
+  },
   "bg_cmd_followUpTask_noTask": {
     "message": "Nenhuma tarefa de acompanhamento fornecida"
   },
