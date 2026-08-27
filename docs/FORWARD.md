@@ -12,7 +12,7 @@ Do **not** implement items 3–4 in the current PR. Do **not** open a second PR 
 
 ## The only plan
 
-1. **Previous PR** — `run_userscript` runner + fixture payload (`cursor/userscript-executor-action-5596`). Still open; this branch rebases onto it. Do not merge it from here.
+1. **Previous PR** — `run_userscript` runner + fixture payload. Squash-merged to `main` as #2 (`bdbd77c`). This branch rebases onto `main`.
 2. **This PR** — ChatGPT organize payload on that runner. Same-origin fetch. A real job. Not `click_element`.
 3. **Then** — payload rewrite / keep-current, several times a day.
 4. **Later, not this week** — Hyperagent observe; Stagehand host after a real CDP 5-step; four-state completion; MCP/REST; LangGraph; marks/SAM.
@@ -61,7 +61,7 @@ Automated coverage (necessary, not sufficient):
 pnpm -F chrome-extension test
 ```
 
-Must cover catalog id + origin gate, injected `.user.js` mocked fetch (Bearer / device / account / title PATCH / no archive), and wait-for-done / signed-out action error. Fixture inject-proof stays.
+Must cover catalog id + origin gate, injected `.user.js` mocked fetch (`Authorization: Bearer`, `Oai-Device-Id`, `Chatgpt-Account-Id`, title PATCH, no archive), and wait-for-done / signed-out action error. Fixture inject-proof stays.
 
 From `apps/extension` after `corepack pnpm install`, still run:
 

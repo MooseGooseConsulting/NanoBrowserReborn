@@ -220,7 +220,7 @@ export const RUN_USERSCRIPT_ACTION = 'run_userscript';
 export const runUserscriptActionSchema: ActionSchema = {
   name: RUN_USERSCRIPT_ACTION,
   description:
-    'Register and run a reviewed userscript payload in the page MAIN world, scoped to the current tab origin. script_id is a reviewed-id enum: "fixture" (banner/counter inject proof) or "chatgpt-organize" (one-shot executeScript on chatgpt.com: list scrap chats and PATCH titles; signed-out or 401 is an error). Do not use click_element to organize ChatGPT chats.',
+    'Run a reviewed userscript payload in the page MAIN world, scoped to the current tab origin. script_id is a reviewed-id enum: "fixture" (banner/counter inject proof; may register) or "chatgpt-organize" (one-shot executeScript on chatgpt.com: list scrap chats and PATCH titles; signed-out or 401 is an error). Do not use click_element to organize ChatGPT chats.',
   schema: z.object({
     intent: z.string().default('').describe('purpose of this action'),
     script_id: z

@@ -360,7 +360,31 @@ describe('chatgpt-organize injected payload (mocked fetch)', () => {
     expect(gm['chatgpt-organize:last-inventory'].scrap).toBeUndefined();
     expect(gm['chatgpt-organize:last-inventory'].preview).toBeUndefined();
     expect(JSON.stringify(gm['chatgpt-organize:last-inventory'])).not.toMatch(/Compare local vLLM/);
+    expect(JSON.stringify(result)).not.toMatch(/"preview"/);
     expect(calls.filter(call => call.method === 'PATCH')).toHaveLength(1);
+  });
+
+  it('treats a conversation-detail 401 as a payload error and does not PATCH', async () => {
+    const { result, calls } = await runInjectedPayload({
+      cookie: 'oai-did=device-from-cookie',
+      fetchImpl: async (url, init = {}) => {
+        if (url.endsWith('/api/auth/session')) {
+          return jsonResponse(200, { accessToken: 'session-token' });
+        }
+        if (url.includes('/backend-api/conversations?')) {
+          return jsonResponse(200, { items: [{ id: 'scrap-rename', title: 'New chat' }] });
+        }
+        if (url.endsWith('/backend-api/conversation/scrap-rename') && (!init.method || init.method === 'GET')) {
+          return jsonResponse(401, {}, 'Unauthorized');
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      },
+    });
+    expect(result.done).toBe(true);
+    expect(result.signedIn).toBe(true);
+    expect(result.error).toMatch(/401/);
+    expect(result.mutations).toEqual([]);
+    expect(calls.filter(call => call.method === 'PATCH')).toEqual([]);
   });
 
   it('treats session 401 as done with an error and does not list or PATCH', async () => {

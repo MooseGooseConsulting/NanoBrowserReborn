@@ -92,6 +92,7 @@ describe('chatgpt-organize action wait helpers', () => {
   it('waitForOrganizeDoneInPage throws on timeout', async () => {
     await expect(waitForOrganizeDoneInPage(30)).rejects.toThrow(/timed out waiting for done/);
     expect((globalThis as { __nanoOrganizeCancelled?: boolean }).__nanoOrganizeCancelled).toBe(true);
+    expect(String(waitForOrganizeDoneInPage)).not.toContain('cancelOrganizeRunInPage');
   });
 
   it('treats signed-out, 401, failed PATCH, and missing state as action errors', () => {

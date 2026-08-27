@@ -196,7 +196,6 @@
       title: item.title || '',
       update_time: item.update_time || null,
       bucket: extra.bucket,
-      preview: extra.preview || '',
       message_count: extra.message_count || 0,
       mutation: extra.mutation || null,
     };
@@ -309,7 +308,12 @@
         jsonById[item.id] = await fetchBackend(`/conversation/${item.id}`, accessToken, { accountId: workspaceId });
         result.fetchedJson += 1;
       } catch (error) {
-        jsonById[item.id] = { error: String(error && error.message ? error.message : error) };
+        const message = String(error && error.message ? error.message : error);
+        jsonById[item.id] = { error: message };
+        if (/\b401\b/.test(message)) {
+          result.error = message;
+          break;
+        }
       }
     }
 
@@ -360,7 +364,6 @@
       const raw = jsonById[item.id];
       return summarizeItem(item, {
         bucket: 'scrap',
-        preview: raw && !raw.error ? firstUserPreview(raw) : '',
         message_count: raw && !raw.error ? messageCount(raw) : 0,
         mutation: mutationById[item.id] || null,
       });
@@ -371,7 +374,6 @@
       const raw = jsonById[currentId];
       result.current = summarizeItem(listed, {
         bucket: isScrapTitle(listed.title) ? 'scrap' : 'named',
-        preview: raw && !raw.error ? firstUserPreview(raw) : '',
         message_count: raw && !raw.error ? messageCount(raw) : 0,
         mutation: mutationById[currentId] || null,
       });

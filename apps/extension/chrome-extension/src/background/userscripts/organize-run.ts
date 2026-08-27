@@ -144,7 +144,7 @@ export function armOrganizeRunInPage(timeoutMs: number): void {
   g.__nanoOrganizeAbort = new AbortController();
 }
 
-/** Serialized into the tab MAIN world. Chrome awaits this Promise. */
+/** Serialized into the tab MAIN world. Chrome awaits this Promise. Do not call other module functions from here. */
 export async function waitForOrganizeDoneInPage(timeoutMs: number): Promise<ChatGptOrganizePageState> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -154,7 +154,13 @@ export async function waitForOrganizeDoneInPage(timeoutMs: number): Promise<Chat
     }
     await new Promise(resolve => setTimeout(resolve, 50));
   }
-  cancelOrganizeRunInPage();
+  const g = globalThis as OrganizePageGlobals;
+  g.__nanoOrganizeCancelled = true;
+  try {
+    g.__nanoOrganizeAbort?.abort();
+  } catch {
+    // already aborted
+  }
   throw new Error('chatgpt-organize timed out waiting for done');
 }
 
