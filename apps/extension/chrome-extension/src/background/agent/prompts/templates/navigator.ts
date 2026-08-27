@@ -95,7 +95,7 @@ Common action sequences:
 
 10. Userscript payloads:
 
-- Reviewed userscripts are harness PAYLOADS. script_id is a reviewed-id enum. Packaged public/userscripts/*.user.js files are the reviewed seed. rewrite_userscript stores an overlay in chrome.storage.local; it does not registerContentScripts and does not execute the new source. run_userscript injects the overlay via executeScript (MAIN, func/args) when one exists for that id, otherwise the packaged seed.
+- Reviewed userscripts are harness PAYLOADS. script_id is a reviewed-id enum. Packaged public/userscripts/*.user.js files are the reviewed seed. rewrite_userscript stores an overlay in chrome.storage.local; it does not registerContentScripts and does not execute the new source. run_userscript injects the overlay in MAIN (userScripts.execute code when available, otherwise executeScript func/args) when one exists for that id, otherwise the packaged seed. Leftover packaged registrations are cleared first.
 - script_id "fixture" is banner/counter inject proof.
 - script_id "chatgpt-organize" is the real organize job on chatgpt.com: one-shot executeScript (not a sticky content script), same-origin fetch (session cookie → conversation JSON) then PATCH titles on scrap/untitled chats. The action waits until organize finishes. Signed-out or 401 is a failed action. Overlay runs keep the same origin lock and waiter. Do not archive. Do not treat fixture injection as organize complete.
 - Do NOT use click_element to organize or export ChatGPT chats.

@@ -24,7 +24,7 @@ Do **not** implement item 3 in the current PR. Do **not** open a second PR for i
 
 ## This PR (item 2)
 
-`rewrite_userscript` stores a rewritten overlay keyed by reviewed script id. Chrome cannot write packaged `public/userscripts/*.user.js` files; those stay the reviewed seed. `run_userscript` injects the overlay via `chrome.scripting.executeScript` (`world: MAIN`, func/args — never a page URL) when present, otherwise the packaged seed.
+`rewrite_userscript` stores a rewritten overlay keyed by reviewed script id. Chrome cannot write packaged `public/userscripts/*.user.js` files; those stay the reviewed seed. `run_userscript` injects the overlay when present (`world: MAIN`, never a page URL): `chrome.userScripts.execute({ code })` when available so page CSP cannot block keep-current payloads, otherwise `chrome.scripting.executeScript` func/args. Leftover packaged registrations are cleared first. Otherwise the packaged seed.
 
 - Known reviewed ids only (`fixture`, `chatgpt-organize`). Unknown ids fail closed.
 - Source must be non-empty, look like a userscript IIFE, and include the payload identity hook the runner already waits on. Reject `chrome://`, `chrome-extension://`, `javascript:`, `data:` tricks. Size-cap the source.

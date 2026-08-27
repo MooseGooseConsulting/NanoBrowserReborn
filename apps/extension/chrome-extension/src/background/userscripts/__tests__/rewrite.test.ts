@@ -3,6 +3,8 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
+  allContentScriptIds,
+  allUserScriptIds,
   CHATGPT_ORGANIZE_FILE,
   CHATGPT_ORGANIZE_SCRIPT_ID,
   COMPAT_FILE,
@@ -17,6 +19,7 @@ import {
   OVERLAY_INJECT_MODE,
   rewriteUserscript,
   validateOverlaySource,
+  wrapOverlaySourceWithOriginLock,
 } from '../rewrite';
 import { executeChatGptOrganizeOnce } from '../organize-run';
 import { URLNotAllowedError } from '@src/background/browser/views';
@@ -106,6 +109,12 @@ describe('rewrite_userscript validation and overlay store', () => {
     expect(() =>
       validateOverlaySource(FIXTURE_SCRIPT_ID, `(() => { location.href = "data:text/html,x"; globalThis.__nanoUserscriptPoc = {}; })();`),
     ).toThrow(/data:/);
+    expect(() =>
+      validateOverlaySource(
+        FIXTURE_SCRIPT_ID,
+        `(() => { const payload = { data: 1 }; globalThis.__nanoUserscriptPoc = payload; })();`,
+      ),
+    ).not.toThrow();
     const oversized = `(() => { globalThis.__nanoUserscriptPoc = {}; /* ${'x'.repeat(MAX_OVERLAY_SOURCE_BYTES)} */ })();`;
     expect(() => validateOverlaySource(FIXTURE_SCRIPT_ID, oversized)).toThrow(/exceeds/);
     expect(() => validateOverlaySource(CHATGPT_ORGANIZE_SCRIPT_ID, validFixtureOverlaySource())).toThrow(
@@ -191,6 +200,64 @@ describe('run_userscript overlay inject', () => {
     expect(String(injectUserscriptSourceInPage)).not.toMatch(/createObjectURL/);
   });
 
+  it('clears leftover packaged registrations before overlay inject', async () => {
+    const unregisters: unknown[] = [];
+    const { api } = eventMockChrome();
+    api.userScripts = {
+      async register() {
+        throw new Error('userScripts.register must not run for overlay inject');
+      },
+      async unregister(filter) {
+        unregisters.push(['user', filter]);
+      },
+    };
+    api.scripting.unregisterContentScripts = async filter => {
+      unregisters.push(['content', filter]);
+    };
+    const source = validFixtureOverlaySource('clear-regs');
+    const overlay: UserscriptOverlay = {
+      scriptId: FIXTURE_SCRIPT_ID,
+      source,
+      rewrittenAt: Date.now(),
+      sourceHash: 'clear',
+    };
+    await injectReviewedOverlay(api, 8, overlay, FIXTURE_SCRIPT_ID);
+    expect(unregisters).toEqual([
+      ['user', { ids: allUserScriptIds() }],
+      ['content', { ids: allContentScriptIds() }],
+    ]);
+  });
+
+  it('injects overlay code via userScripts.execute when available (no page eval)', async () => {
+    const executes: unknown[] = [];
+    const { api, calls } = eventMockChrome();
+    Object.assign(api.userScripts ?? {}, {
+      async execute(injection: unknown) {
+        executes.push(injection);
+        return [];
+      },
+    });
+    const source = validFixtureOverlaySource('csp-safe');
+    const overlay: UserscriptOverlay = {
+      scriptId: FIXTURE_SCRIPT_ID,
+      source,
+      rewrittenAt: Date.now(),
+      sourceHash: 'csp',
+    };
+    await injectReviewedOverlay(api, 9, overlay, FIXTURE_SCRIPT_ID);
+    expect(executes).toHaveLength(1);
+    expect(executes[0]).toMatchObject({
+      target: { tabId: 9 },
+      world: 'MAIN',
+      injectImmediately: true,
+    });
+    const code = (executes[0] as { js: Array<{ code: string }> }).js[0].code;
+    expect(code).toContain(source);
+    expect(code).toContain('overlay inject refused');
+    expect(code).not.toMatch(/blob:/);
+    expect(calls.filter(call => (call as { func?: unknown }).func)).toHaveLength(0);
+  });
+
   it('fails closed if a fixture overlay is used when script_id is chatgpt-organize', async () => {
     const { api, calls } = eventMockChrome();
     const fixtureOverlay: UserscriptOverlay = {
@@ -236,6 +303,14 @@ describe('run_userscript overlay inject', () => {
     expect(() => assertChatGptOrganizeTabAllowed('https://chatgpt.com/c/abc')).not.toThrow();
     expect(() => assertChatGptOrganizeTabAllowed('https://example.com/')).toThrow(URLNotAllowedError);
     expect(() => assertChatGptOrganizeTabAllowed('https://chat.openai.com/c/abc')).toThrow(URLNotAllowedError);
+  });
+
+  it('origin-lock wrapper runs the live host check before overlay source', () => {
+    const source = validOrganizeOverlaySource();
+    const wrapped = wrapOverlaySourceWithOriginLock(source, ['chatgpt.com']);
+    expect(wrapped.indexOf('chatgpt.com')).toBeLessThan(wrapped.indexOf(source));
+    expect(wrapped).toContain(source);
+    expect(wrapped).not.toMatch(/blob:/);
   });
 
   it('refuses overlay eval when the live page host is not in the allowed list', () => {
@@ -316,6 +391,7 @@ describe('rewrite_userscript action schema and navigator prompt', () => {
     expect(navigatorSystemPromptTemplate).toMatch(/does not registerContentScripts/);
     expect(navigatorSystemPromptTemplate).toMatch(/does not execute the new source/);
     expect(navigatorSystemPromptTemplate).toMatch(/rewrite_userscript/);
+    expect(navigatorSystemPromptTemplate).toMatch(/userScripts\.execute/);
     expect(navigatorSystemPromptTemplate).toMatch(/"reset": true/);
     expect(navigatorSystemPromptTemplate).not.toMatch(/catalog hook/);
   });
