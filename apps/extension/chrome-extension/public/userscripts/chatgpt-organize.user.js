@@ -70,11 +70,7 @@
   function deviceId() {
     const cookie = document.cookie.match(/(?:^|;)\s*oai-did=([^;]+)/);
     if (cookie) return decodeURIComponent(cookie[1]);
-    const existing = GM_getValue('chatgpt-organize:device-id', '');
-    if (existing) return existing;
-    const id = crypto.randomUUID();
-    GM_setValue('chatgpt-organize:device-id', id);
-    return id;
+    return '';
   }
 
   function accountId(session) {
@@ -107,9 +103,10 @@
     const headers = {
       Accept: 'application/json',
       Authorization: `Bearer ${accessToken}`,
-      'Oai-Device-Id': deviceId(),
       'Oai-Language': 'en-US',
     };
+    const device = deviceId();
+    if (device) headers['Oai-Device-Id'] = device;
     const account = options.accountId;
     if (account) headers['Chatgpt-Account-Id'] = account;
     if (options.body) headers['Content-Type'] = 'application/json';

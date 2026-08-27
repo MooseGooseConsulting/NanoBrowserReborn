@@ -28,6 +28,32 @@ describe('chatgpt-organize action wait helpers', () => {
     expect((globalThis as { __nanoOrganizeRun?: boolean }).__nanoOrganizeRun).toBe(true);
   });
 
+  it('arm-then-wait does not resolve from a stale prior done: true', async () => {
+    (
+      globalThis as { __nanoChatGptOrganize?: { done: boolean; signedIn: boolean; listed: number } }
+    ).__nanoChatGptOrganize = {
+      done: true,
+      signedIn: true,
+      listed: 99,
+    };
+    armOrganizeRunInPage();
+    expect((globalThis as { __nanoOrganizeRun?: boolean }).__nanoOrganizeRun).toBe(true);
+    expect((globalThis as { __nanoChatGptOrganize?: unknown }).__nanoChatGptOrganize).toBeUndefined();
+
+    const wait = waitForOrganizeDoneInPage(400);
+    await new Promise(resolve => setTimeout(resolve, 80));
+    (
+      globalThis as { __nanoChatGptOrganize?: { done: boolean; signedIn: boolean; listed: number } }
+    ).__nanoChatGptOrganize = {
+      done: true,
+      signedIn: true,
+      listed: 2,
+    };
+    const state = await wait;
+    expect(state.listed).toBe(2);
+    expect(state.listed).not.toBe(99);
+  });
+
   it('waitForOrganizeDoneInPage resolves only after done is set', async () => {
     setTimeout(() => {
       (globalThis as { __nanoChatGptOrganize?: { done: boolean; signedIn: boolean } }).__nanoChatGptOrganize = {
@@ -101,5 +127,26 @@ describe('chatgpt-organize action wait helpers', () => {
       ['user', { ids: [userScriptIdFor(CHATGPT_ORGANIZE_SCRIPT_ID)] }],
       ['content', { ids: [contentScriptIdFor(CHATGPT_ORGANIZE_SCRIPT_ID)] }],
     ]);
+  });
+
+  it('logs unregister failures without throwing', async () => {
+    const api: UserscriptChromeApi = {
+      userScripts: {
+        async register() {},
+        async unregister() {
+          throw new Error('user unregister boom');
+        },
+      },
+      scripting: {
+        async registerContentScripts() {},
+        async unregisterContentScripts() {
+          throw new Error('content unregister boom');
+        },
+        async executeScript() {
+          return [];
+        },
+      },
+    };
+    await expect(unregisterChatGptOrganize(api)).resolves.toBeUndefined();
   });
 });
