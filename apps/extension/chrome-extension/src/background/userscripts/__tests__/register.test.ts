@@ -12,6 +12,7 @@ import {
   FIXTURE_FILE,
   FIXTURE_SCRIPT_ID,
   PACKAGED_MODE_FILE,
+  REVIEWED_USERSCRIPT_HOSTS,
   USER_SCRIPTS_MODE_FILE,
 } from '../catalog';
 import { matchesForUrl, registerAndRunReviewedUserscript, RUN_AT, WORLD, type UserscriptChromeApi } from '../register';
@@ -232,6 +233,24 @@ describe('userscript registration helper', () => {
     expect(calls.executeScript).toHaveLength(0);
   });
 
+  it('allows chatgpt-organize on chat.openai.com and rejects www.chatgpt.com', async () => {
+    const { api, calls } = eventMockChrome({ nativeUserScripts: true });
+    await registerAndRunReviewedUserscript(api, {
+      scriptId: CHATGPT_ORGANIZE_SCRIPT_ID,
+      tabId: 7,
+      tabUrl: 'https://chat.openai.com/c/abc',
+    });
+    expect(calls.contentRegister).toHaveLength(1);
+    await expect(
+      registerAndRunReviewedUserscript(api, {
+        scriptId: CHATGPT_ORGANIZE_SCRIPT_ID,
+        tabId: 7,
+        tabUrl: 'https://www.chatgpt.com/',
+      }),
+    ).rejects.toBeInstanceOf(URLNotAllowedError);
+    expect(REVIEWED_USERSCRIPT_HOSTS[CHATGPT_ORGANIZE_SCRIPT_ID]).toEqual(['chatgpt.com', 'chat.openai.com']);
+  });
+
   it('keys filesForMode by scriptId, not a module global', () => {
     expect(filesForMode('chrome.scripting.registerContentScripts', FIXTURE_SCRIPT_ID)).toEqual([
       PACKAGED_MODE_FILE,
@@ -346,11 +365,12 @@ describe('run_userscript action schema', () => {
 });
 
 describe('navigator userscript prompt', () => {
-  it('does not claim ChatGPT organize/export is implemented', () => {
+  it('tells the navigator chatgpt-organize is the real organize job on allowed origins', () => {
     expect(navigatorSystemPromptTemplate).toContain('script_id "fixture"');
-    expect(navigatorSystemPromptTemplate).toMatch(/catalog hook/);
-    expect(navigatorSystemPromptTemplate).toMatch(/does not organize or export chats/);
-    expect(navigatorSystemPromptTemplate).not.toMatch(/That job is a userscript payload/);
+    expect(navigatorSystemPromptTemplate).toMatch(/same-origin fetch/);
+    expect(navigatorSystemPromptTemplate).toMatch(/PATCH titles on scrap/);
+    expect(navigatorSystemPromptTemplate).not.toMatch(/catalog hook/);
+    expect(navigatorSystemPromptTemplate).not.toMatch(/does not organize or export chats/);
   });
 });
 
