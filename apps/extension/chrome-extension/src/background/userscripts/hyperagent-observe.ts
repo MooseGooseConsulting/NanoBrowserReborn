@@ -322,7 +322,7 @@ function closeTurn(state: ObserveReducerState, snap: ObserveSnapshot): ObserveRo
   }
   const endedAt = snap.completeAt || snap.t;
   const row: ObserveRow = {
-    n: (state.turns[0] ? state.turns[0].n : 0) + 1,
+    n: state.turns.reduce((max, turn) => Math.max(max, turn.n), 0) + 1,
     threadId: state.threadId,
     startedAt: open.startedAt,
     endedAt,
@@ -343,8 +343,23 @@ function closeTurn(state: ObserveReducerState, snap: ObserveSnapshot): ObserveRo
   return row;
 }
 
+function completedOffscreenCycle(state: ObserveReducerState, snap: ObserveSnapshot): boolean {
+  const prev = state.latest;
+  return Boolean(
+    !snap.running &&
+      !state.open &&
+      prev &&
+      snap.enqueuedAt > 0 &&
+      snap.enqueuedAt > prev.enqueuedAt &&
+      snap.completeAt >= snap.enqueuedAt,
+  );
+}
+
 export function applyObserveSnapshot(state: ObserveReducerState, snap: ObserveSnapshot): ObserveRow | null {
+  state.err = null;
+
   if (snap.running && !state.open) {
+    state.seen = {};
     state.open = {
       start: snap,
       startedAt: snap.enqueuedAt || snap.t,
@@ -352,7 +367,17 @@ export function applyObserveSnapshot(state: ObserveReducerState, snap: ObserveSn
       streamCost: 0,
       source: snap.phase.source,
     };
+  } else if (completedOffscreenCycle(state, snap) && state.latest) {
+    state.seen = {};
+    state.open = {
+      start: state.latest,
+      startedAt: snap.enqueuedAt,
+      caps: [],
+      streamCost: 0,
+      source: snap.phase.source,
+    };
   }
+
   recordCapture(state, snap.capture, snap.t);
   recordCapture(state, snap.indicator, snap.t);
 
@@ -361,7 +386,6 @@ export function applyObserveSnapshot(state: ObserveReducerState, snap: ObserveSn
     closed = closeTurn(state, snap);
   }
   state.latest = snap;
-  state.err = null;
   return closed;
 }
 
@@ -505,6 +529,9 @@ export async function runHyperagentObservePass(options: {
     return readJson(response, path);
   };
 
+  const asErrorMessage = (error: unknown): string =>
+    String(error instanceof Error ? error.message : error);
+
   const cycle = async () => {
     const [status, thread, usage, breakdown] = (await Promise.all([
       get(`/api/threads/${threadId}/status`),
@@ -513,14 +540,34 @@ export async function runHyperagentObservePass(options: {
       get(`/api/threads/${threadId}/usage-breakdown`),
     ])) as [ThreadStatusPayload, ThreadPayload, UsagePayload, UsageBreakdownPayload];
     result.signedIn = true;
+    result.error = null;
     const snap = snapshotFromApis(status, thread, usage, breakdown, now());
     applyObserveSnapshot(state, snap);
   };
 
-  await cycle();
+  try {
+    await cycle();
+  } catch (error) {
+    result.error = asErrorMessage(error);
+    result.rows = [...state.turns].reverse();
+    result.latest = state.latest;
+    result.streamEvents = state.streamEvents;
+    result.streamUp = state.streamUp;
+    result.mutatingCalls = fetches.filter(call => call.method !== 'GET' && call.method !== 'HEAD');
+    return result;
+  }
 
   if (options.openEventSource) {
-    const pending: Promise<void>[] = [];
+    let refreshTail = Promise.resolve();
+    const enqueueRefresh = () => {
+      refreshTail = refreshTail.then(async () => {
+        try {
+          await cycle();
+        } catch (error) {
+          result.error = asErrorMessage(error);
+        }
+      });
+    };
     const streamUrl = `${origin}/api/events/stream?threadId=${threadId}`;
     const handle = options.openEventSource(streamUrl, {
       onopen: () => {
@@ -531,12 +578,18 @@ export async function runHyperagentObservePass(options: {
       },
       onmessage: event => {
         if (handleSseData(state, event.data) === 'refresh') {
-          pending.push(cycle());
+          enqueueRefresh();
         }
       },
     });
-    await Promise.resolve();
-    await Promise.all(pending);
+    let previousTail: Promise<void> | null = null;
+    let spins = 0;
+    while (spins < 32 && previousTail !== refreshTail) {
+      previousTail = refreshTail;
+      await Promise.resolve();
+      await refreshTail;
+      spins += 1;
+    }
     handle.close();
   }
 
@@ -545,6 +598,7 @@ export async function runHyperagentObservePass(options: {
   result.streamEvents = state.streamEvents;
   result.streamUp = state.streamUp;
   result.mutatingCalls = fetches.filter(call => call.method !== 'GET' && call.method !== 'HEAD');
+  result.error = result.error || state.err;
   return result;
 }
 
