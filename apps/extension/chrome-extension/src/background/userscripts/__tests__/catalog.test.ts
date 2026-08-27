@@ -78,6 +78,7 @@ describe('hyperagent-observe payload source', () => {
     expect(src).toContain('/api/events/stream');
     expect(src).toContain('EventSource');
     expect(src).toContain('__nanoHyperagentObserveStop');
+    expect(src).toContain('MAX_FETCHES');
     expect(src).not.toMatch(/saved\.rows\.slice\(\)\.reverse\(\)/);
     expect(src).toMatch(/credentials:\s*'same-origin'/);
     expect(src).toMatch(/method:\s*'GET'/);

@@ -14,6 +14,7 @@
   const IDLE_MS = 10000;
   const MAX_TURNS = 300;
   const MAX_CAPTURES = 5000;
+  const MAX_FETCHES = 40;
 
   if (typeof globalThis[STOP_KEY] === 'function') {
     try {
@@ -192,6 +193,11 @@
     return state.turns.reduce((max, turn) => Math.max(max, turn.n || 0), 0) + 1;
   }
 
+  function closedCostDelta(open, snap) {
+    const usageDelta = (snap.cost || 0) - (open.start.cost || 0);
+    return usageDelta > 0 ? usageDelta : open.streamCost || 0;
+  }
+
   function closeTurn(snap) {
     const open = state.open;
     const metered = meteredDelta(open.start.items, snap.items);
@@ -214,7 +220,7 @@
       byok: byokDelta(open.start.byok, snap.byok),
       calls: open.caps.length,
       sampled: sumCaptures(open.caps),
-      costDelta: open.streamCost || (snap.cost || 0) - (open.start.cost || 0),
+      costDelta: closedCostDelta(open, snap),
       phaseAtClose: snap.phase.k,
     };
     state.turns.unshift(row);
@@ -266,6 +272,9 @@
   async function getJSON(path) {
     const url = location.origin + path;
     result.fetches.push({ url, method: 'GET' });
+    if (result.fetches.length > MAX_FETCHES) {
+      result.fetches.splice(0, result.fetches.length - MAX_FETCHES);
+    }
     const response = await fetch(path, {
       method: 'GET',
       credentials: 'same-origin',

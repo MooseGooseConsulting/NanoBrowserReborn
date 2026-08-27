@@ -311,6 +311,11 @@ function recordCapture(state: ObserveReducerState, split: TokenSplit | null, at:
   }
 }
 
+function closedCostDelta(open: OpenRun, snap: ObserveSnapshot): number {
+  const usageDelta = (snap.cost || 0) - (open.start.cost || 0);
+  return usageDelta > 0 ? usageDelta : open.streamCost || 0;
+}
+
 function closeTurn(state: ObserveReducerState, snap: ObserveSnapshot): ObserveRow {
   const open = state.open as OpenRun;
   const metered = meteredDelta(open.start.items, snap.items);
@@ -335,7 +340,7 @@ function closeTurn(state: ObserveReducerState, snap: ObserveSnapshot): ObserveRo
     byok: byokDelta(open.start.byok, snap.byok),
     calls: open.caps.length,
     sampled: sumCaptures(open.caps),
-    costDelta: open.streamCost || (snap.cost || 0) - (open.start.cost || 0),
+    costDelta: closedCostDelta(open, snap),
     phaseAtClose: snap.phase.k,
   };
   state.turns.unshift(row);
