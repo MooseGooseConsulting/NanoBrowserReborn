@@ -26,6 +26,8 @@ import {
   waitForChatGptOrganizeDone,
   waitForOrganizeDoneInPage,
 } from '../organize-run';
+import { injectUserscriptSourceInPage, OVERLAY_INJECT_MODE } from '../rewrite';
+import type { UserscriptOverlay } from '../overlay';
 
 describe('chatgpt-organize action wait helpers', () => {
   afterEach(() => {
@@ -313,5 +315,52 @@ describe('chatgpt-organize action wait helpers', () => {
         files: [PACKAGED_MODE_FILE, COMPAT_FILE, CHATGPT_ORGANIZE_FILE],
       },
     ]);
+  });
+
+  it('injects overlay source instead of files and still waits on __nanoChatGptOrganize.done', async () => {
+    const overlaySource = `(() => { globalThis.__nanoOrganizeRun; globalThis.__nanoChatGptOrganize = { done: true }; })();`;
+    const overlay: UserscriptOverlay = {
+      scriptId: CHATGPT_ORGANIZE_SCRIPT_ID,
+      source: overlaySource,
+      rewrittenAt: Date.now(),
+      sourceHash: 'overlay-hash',
+    };
+    const calls: { register: unknown[]; userRegister: unknown[]; execute: unknown[] } = {
+      register: [],
+      userRegister: [],
+      execute: [],
+    };
+    const api: UserscriptChromeApi = {
+      userScripts: {
+        async register(scripts) {
+          calls.userRegister.push(scripts);
+        },
+        async unregister() {},
+      },
+      scripting: {
+        async registerContentScripts(scripts) {
+          calls.register.push(scripts);
+        },
+        async unregisterContentScripts() {},
+        async executeScript(injection) {
+          calls.execute.push(injection);
+          return [];
+        },
+      },
+    };
+    const injected = await executeChatGptOrganizeOnce(api, 11, overlay);
+    expect(injected.mode).toBe(OVERLAY_INJECT_MODE);
+    expect(calls.register).toEqual([]);
+    expect(calls.userRegister).toEqual([]);
+    expect(calls.execute).toHaveLength(2);
+    expect(calls.execute[0]).toMatchObject({
+      files: [PACKAGED_MODE_FILE, COMPAT_FILE],
+    });
+    expect(calls.execute[1]).toMatchObject({
+      args: [overlaySource],
+      world: 'MAIN',
+    });
+    expect((calls.execute[1] as { func: unknown }).func).toBe(injectUserscriptSourceInPage);
+    expect(JSON.stringify(calls.execute)).not.toContain(CHATGPT_ORGANIZE_FILE);
   });
 });

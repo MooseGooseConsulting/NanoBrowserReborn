@@ -11,6 +11,8 @@ import {
   type UserscriptRegistrationMode,
 } from './catalog';
 import { assertUserscriptOrigin, isInjectableHttpUrl, WORLD, type UserscriptChromeApi } from './register';
+import { injectReviewedOverlay, OVERLAY_INJECT_MODE } from './rewrite';
+import type { UserscriptOverlay } from './overlay';
 
 const logger = createLogger('Userscripts');
 
@@ -85,7 +87,11 @@ export function assertInjectedFilesMatchScript(scriptId: string, files: readonly
 export async function executeChatGptOrganizeOnce(
   api: UserscriptChromeApi,
   tabId: number,
-): Promise<{ mode: UserscriptRegistrationMode; js: string[] }> {
+  overlay?: UserscriptOverlay | null,
+): Promise<{ mode: UserscriptRegistrationMode | typeof OVERLAY_INJECT_MODE; js: string[] }> {
+  if (overlay) {
+    return injectReviewedOverlay(api, tabId, overlay, CHATGPT_ORGANIZE_SCRIPT_ID);
+  }
   const attempts: UserscriptRegistrationMode[] = [
     'chrome.scripting.registerContentScripts',
     'chrome.userScripts',

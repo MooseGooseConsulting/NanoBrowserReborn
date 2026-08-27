@@ -968,7 +968,7 @@
     }
   },
   "act_runUserscript_start": {
-    "message": "Registrando e executando o userscript $SCRIPT_ID$",
+    "message": "Executando o userscript $SCRIPT_ID$",
     "placeholders": {
       "script_id": {
         "content": "$1",
@@ -986,6 +986,37 @@
       "mode": {
         "content": "$2",
         "example": "chrome.scripting.registerContentScripts"
+      }
+    }
+  },
+  "act_rewriteUserscript_start": {
+    "message": "Reescrevendo overlay do userscript $SCRIPT_ID$",
+    "placeholders": {
+      "script_id": {
+        "content": "$1",
+        "example": "fixture"
+      }
+    }
+  },
+  "act_rewriteUserscript_ok": {
+    "message": "Overlay armazenado para $SCRIPT_ID$ hash $HASH$",
+    "placeholders": {
+      "script_id": {
+        "content": "$1",
+        "example": "fixture"
+      },
+      "hash": {
+        "content": "$2",
+        "example": "abc123"
+      }
+    }
+  },
+  "act_rewriteUserscript_reset_ok": {
+    "message": "Overlay de $SCRIPT_ID$ removido; o seed empacotado será usado",
+    "placeholders": {
+      "script_id": {
+        "content": "$1",
+        "example": "fixture"
       }
     }
   }
