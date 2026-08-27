@@ -1,5 +1,9 @@
 import { z } from 'zod';
-import { CHATGPT_ORGANIZE_SCRIPT_ID, FIXTURE_SCRIPT_ID } from '../../userscripts/catalog';
+import {
+  CHATGPT_ORGANIZE_SCRIPT_ID,
+  FIXTURE_SCRIPT_ID,
+  HYPERAGENT_OBSERVE_SCRIPT_ID,
+} from '../../userscripts/catalog';
 
 export interface ActionSchema {
   name: string;
@@ -220,11 +224,11 @@ export const RUN_USERSCRIPT_ACTION = 'run_userscript';
 export const runUserscriptActionSchema: ActionSchema = {
   name: RUN_USERSCRIPT_ACTION,
   description:
-    'Register and run a reviewed userscript payload in the page MAIN world, scoped to the current tab origin. script_id is a reviewed-id enum: "fixture" (banner/counter inject proof) or "chatgpt-organize" (catalog hook only; organize/fetch body is not implemented). Do not treat chatgpt-organize injection as organize or export complete.',
+    'Register and run a reviewed userscript payload in the page MAIN world, scoped to the current tab origin. script_id is a reviewed-id enum: "fixture" (banner/counter inject proof), "chatgpt-organize" (catalog hook only; organize/fetch body is not implemented), or "hyperagent-observe" (Hyperagent OBSERVE via same-origin GET + SSE, one row per run, no writes; hyperagent.com only). Do not treat chatgpt-organize injection as organize or export complete. Do not use hyperagent-observe on other sites. Do not PATCH/POST to Hyperagent. Do not use MCP OAuth.',
   schema: z.object({
     intent: z.string().default('').describe('purpose of this action'),
     script_id: z
-      .enum([FIXTURE_SCRIPT_ID, CHATGPT_ORGANIZE_SCRIPT_ID])
+      .enum([FIXTURE_SCRIPT_ID, CHATGPT_ORGANIZE_SCRIPT_ID, HYPERAGENT_OBSERVE_SCRIPT_ID])
       .default(FIXTURE_SCRIPT_ID)
       .describe('reviewed payload id'),
   }),

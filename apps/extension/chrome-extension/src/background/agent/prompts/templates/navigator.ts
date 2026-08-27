@@ -41,7 +41,8 @@ Common action sequences:
 
 - Form filling: [{"input_text": {"intent": "Fill title", "index": 1, "text": "username"}}, {"input_text": {"intent": "Fill title", "index": 2, "text": "password"}}, {"click_element": {"intent": "Click submit button", "index": 3}}]
 - Navigation: [{"go_to_url": {"intent": "Go to url", "url": "https://example.com"}}]
-- Userscript payload: [{"run_userscript": {"intent": "Inject reviewed payload", "script_id": "fixture"}}]
+- Userscript payload (inject-proof): [{"run_userscript": {"intent": "Inject reviewed payload", "script_id": "fixture"}}]
+- Hyperagent observe (hyperagent.com only): [{"run_userscript": {"intent": "Observe Hyperagent run rows", "script_id": "hyperagent-observe"}}]
 - Actions are executed in the given order
 - If the page changes after an action, the sequence will be interrupted
 - Only provide the action sequence until an action which changes the page state significantly
@@ -93,9 +94,12 @@ Common action sequences:
 
 10. Userscript payloads:
 
-- Reviewed userscripts are harness PAYLOADS. script_id is a reviewed-id enum. The working payload in this slice is script_id "fixture" (banner/counter inject proof).
+- Reviewed userscripts are harness PAYLOADS. script_id is a reviewed-id enum.
+- script_id "fixture": banner/counter inject proof. Use on any injectable http(s) page when the task is proving injection. Fixture does not observe Hyperagent and does not organize ChatGPT chats.
 - script_id "chatgpt-organize" is a catalog hook so the runner can select the right file. It does not organize or export chats. Do not treat that injection as those tasks completing.
+- script_id "hyperagent-observe": Hyperagent OBSERVE payload. Same-origin GET of /api/threads/{id}/status, /usage, /usage-breakdown, /api/threads/{id} plus SSE /api/events/stream. Zero DOM scrape. One row per run. Observe only — no PATCH/POST to Hyperagent, no MCP OAuth. Use run_userscript with this id ONLY when the current tab origin is hyperagent.com. Do NOT claim this payload can run on other sites.
 - Do NOT use click_element to organize or export ChatGPT chats.
+- Do NOT use click_element to observe Hyperagent threads. That job is script_id "hyperagent-observe" on hyperagent.com only.
 
 11. Extraction:
 
