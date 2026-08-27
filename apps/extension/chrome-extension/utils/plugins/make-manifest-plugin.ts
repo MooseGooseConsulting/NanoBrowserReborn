@@ -4,7 +4,6 @@ import { pathToFileURL } from 'node:url';
 import process from 'node:process';
 import { colorLog, ManifestParser } from '@extension/dev-utils';
 import type { PluginOption } from 'vite';
-import type { Manifest } from '@extension/dev-utils/dist/lib/manifest-parser/type';
 
 const rootDir = resolve(__dirname, '..', '..');
 const refreshFile = resolve(__dirname, '..', 'refresh.js');
@@ -58,7 +57,7 @@ export default function makeManifestPlugin(config: { outDir: string }): PluginOp
   };
 }
 
-function addRefreshContentScript(manifest: Manifest) {
+function addRefreshContentScript(manifest: chrome.runtime.ManifestV3) {
   manifest.content_scripts = manifest.content_scripts || [];
   manifest.content_scripts.push({
     matches: ['http://*/*', 'https://*/*', '<all_urls>'],

@@ -11,22 +11,33 @@ import { ChatDeepSeek } from '@langchain/deepseek';
 
 const maxTokens = 1024 * 4;
 
-// Custom ChatLlama class to handle Llama API response format
+type CompletionsClient = {
+  completionWithRetry: (request: any, options?: any) => Promise<any>;
+};
+
+// Custom ChatLlama class to handle Llama API response format.
+// LangChain 0.6 calls completionWithRetry on the inner Completions client, not ChatOpenAI.
 class ChatLlama extends ChatOpenAI {
   constructor(args: any) {
     super(args);
+    const holder = this as unknown as { completions: CompletionsClient };
+    const original = holder.completions.completionWithRetry.bind(holder.completions);
+    holder.completions.completionWithRetry = (request: any, options?: any) =>
+      ChatLlama.transformLlamaCompletion(original, request, options);
   }
 
-  // Override the completionWithRetry method to intercept and transform the response
-  async completionWithRetry(request: any, options?: any): Promise<any> {
+  private static async transformLlamaCompletion(
+    original: CompletionsClient['completionWithRetry'],
+    request: any,
+    options?: any,
+  ): Promise<any> {
     try {
-      // Make the request using the parent's implementation
-      const response = await super.completionWithRetry(request, options);
+      const response = await original(request, options);
 
       // Check if this is a Llama API response format
       if (response?.completion_message?.content?.text) {
         // Transform Llama API response to OpenAI format
-        const transformedResponse = {
+        return {
           id: response.id || 'llama-response',
           object: 'chat.completion',
           created: Date.now(),
@@ -47,8 +58,6 @@ class ChatLlama extends ChatOpenAI {
             total_tokens: response.metrics?.find((m: any) => m.metric === 'num_total_tokens')?.value || 0,
           },
         };
-
-        return transformedResponse;
       }
 
       return response;
