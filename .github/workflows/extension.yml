@@ -1,0 +1,67 @@
+# Extension CI. No secrets. Workspace: apps/extension.
+name: Extension
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: apps/extension
+
+env:
+  CI: true
+  HUSKY: '0'
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+  TURBO_TELEMETRY_DISABLED: '1'
+
+jobs:
+  type-check:
+    name: type-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup extension workspace
+        uses: ./.github/actions/setup-extension
+
+      - name: Type-check
+        run: pnpm type-check
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup extension workspace
+        uses: ./.github/actions/setup-extension
+
+      - name: Test
+        run: pnpm -F chrome-extension test
+
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup extension workspace
+        uses: ./.github/actions/setup-extension
+
+      - name: Build
+        run: pnpm build
