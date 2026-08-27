@@ -33,6 +33,7 @@ import { URLNotAllowedError } from '@src/background/browser/views';
 import { registerAndRunReviewedUserscript, type UserscriptChromeApi } from '@src/background/userscripts/register';
 import {
   armChatGptOrganizeRun,
+  assertChatGptOrganizeTabAllowed,
   isChatGptOrganizeScript,
   organizeActionFailure,
   unregisterChatGptOrganize,
@@ -733,6 +734,7 @@ export class ActionBuilder {
         const api = chrome as UserscriptChromeApi;
         const isOrganize = isChatGptOrganizeScript(scriptId);
         if (isOrganize) {
+          assertChatGptOrganizeTabAllowed(tabUrl, firewall.allowedUrls, firewall.deniedUrls);
           await armChatGptOrganizeRun(api, page.tabId);
         }
         try {
@@ -750,8 +752,10 @@ export class ActionBuilder {
               this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_FAIL, failure);
               return new ActionResult({ error: failure, includeInMemory: true });
             }
-            const mutationCount = Array.isArray(state.mutations) ? state.mutations.length : 0;
-            const msg = `${t('act_runUserscript_ok', [scriptId, result.mode])} listed ${state.listed ?? 0} · mutations ${mutationCount}`;
+            const successfulMutations = Array.isArray(state.mutations)
+              ? state.mutations.filter(item => item && item.ok !== false).length
+              : 0;
+            const msg = `${t('act_runUserscript_ok', [scriptId, result.mode])} listed ${state.listed ?? 0} · mutations ${successfulMutations}`;
             this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);
             return new ActionResult({ extractedContent: msg, includeInMemory: true });
           }
