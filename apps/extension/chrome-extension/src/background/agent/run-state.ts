@@ -219,7 +219,7 @@ export function completeTurn(
   clock.lastCompletedSource = clock.runningTurnSource;
   clock.lastCompletedOutput = options.output ?? null;
   clock.lastMessageIsError = options.error === true;
-  clock.lastRunMessageRole = options.error ? 'assistant' : 'assistant';
+  clock.lastRunMessageRole = 'assistant';
   clock.runningTurnSource = null;
   clock.runningTurnId = null;
 }
