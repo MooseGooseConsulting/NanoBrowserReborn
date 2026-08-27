@@ -75,6 +75,10 @@ describe('keep-current organize failure classification', () => {
     'URL: https://example.com/ is not allowed',
     'overlay inject refused: example.com is not allowed',
     'one-shot only; skip sticky content-script rerun',
+    'executeScript failed: Could not establish connection',
+    'userScripts.execute is not available',
+    'chatgpt-organize helper files missing after inject',
+    'chatgpt-organize storage quota exceeded',
   ])('does not treat %s as keep-current', reason => {
     expect(classifyOrganizeKeepCurrentFailure(reason)).toEqual({
       eligible: false,

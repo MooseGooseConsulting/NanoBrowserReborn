@@ -89,9 +89,6 @@ export function classifyOrganizeKeepCurrentFailure(
   ) {
     return { eligible: true, kind: 'contract_or_action_drift' };
   }
-  if (/chatgpt-organize/i.test(text) && !/rewrite_userscript/i.test(text)) {
-    return { eligible: true, kind: 'contract_or_action_drift' };
-  }
   return { eligible: false, kind: 'not_eligible' };
 }
 
