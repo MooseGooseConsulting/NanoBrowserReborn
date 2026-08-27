@@ -13,12 +13,72 @@ import {
 import { assertUserscriptOrigin } from '../register';
 import { URLNotAllowedError } from '@src/background/browser/views';
 
+type FetchInit = { method?: string; headers?: Record<string, string>; body?: string };
+type FetchCall = { url: string; method: string; headers: Record<string, string>; body?: string };
+type MockResponse = { ok: boolean; status: number; statusText: string; json: () => Promise<unknown> };
+type OrganizeMutation = { id?: string; action?: string; title?: string; ok?: boolean; error?: string };
+type OrganizeResult = {
+  done?: boolean;
+  signedIn?: boolean;
+  listed?: number;
+  fetchedJson?: number;
+  error?: string | null;
+  mutations: OrganizeMutation[];
+  scrap: Array<{ id?: string; title?: string }>;
+  named?: unknown[];
+  current?: unknown;
+};
+type Banner = { style: { cssText: string }; dataset: Record<string, string>; textContent: string; id: string };
+type PayloadVm = {
+  location: URL;
+  document: {
+    body: { prepend(): void };
+    cookie: string;
+    querySelector: () => Banner | null;
+    createElement: () => Banner;
+  };
+  fetch: (url: string, init?: FetchInit) => Promise<MockResponse>;
+  GM_getValue: (key: string, fallback?: unknown) => unknown;
+  GM_setValue: (key: string, value: unknown) => void;
+  crypto: { randomUUID: () => string };
+  AbortController: typeof AbortController;
+  setTimeout: typeof setTimeout;
+  clearTimeout: typeof clearTimeout;
+  Promise: PromiseConstructor;
+  String: StringConstructor;
+  Boolean: BooleanConstructor;
+  Array: ArrayConstructor;
+  Object: ObjectConstructor;
+  Date: DateConstructor;
+  JSON: JSON;
+  Error: ErrorConstructor;
+  Map: MapConstructor;
+  Set: SetConstructor;
+  Number: NumberConstructor;
+  encodeURIComponent: typeof encodeURIComponent;
+  decodeURIComponent: typeof decodeURIComponent;
+  globalThis?: PayloadVm;
+  __nanoUserscriptMode?: string;
+  __nanoOrganizeRun?: boolean;
+  __nanoOrganizeDeadline?: number;
+  __nanoOrganizeCancelled?: boolean;
+  __nanoOrganizeAbort?: AbortController;
+  __nanoChatGptOrganize?: OrganizeResult;
+};
+type RunOptions = {
+  href?: string;
+  cookie?: string;
+  oneShot?: boolean;
+  deadlineExpired?: boolean;
+  fetchImpl: (url: string, init?: FetchInit) => Promise<MockResponse>;
+};
+
 function payloadSource() {
   const here = dirname(fileURLToPath(import.meta.url));
   return readFileSync(resolve(here, '../../../../public/userscripts/chatgpt-organize.user.js'), 'utf8');
 }
 
-function jsonResponse(status, body, statusText = 'OK') {
+function jsonResponse(status: number, body: unknown, statusText = 'OK'): MockResponse {
   return {
     ok: status >= 200 && status < 300,
     status,
@@ -57,7 +117,7 @@ function insertionOrderTrapConversation() {
   };
 }
 
-function activeBranchConversation(firstUser, secondUserObject) {
+function activeBranchConversation(firstUser: unknown, secondUserObject: unknown) {
   return {
     current_node: 'leaf',
     mapping: {
@@ -93,13 +153,13 @@ function activeBranchConversation(firstUser, secondUserObject) {
   };
 }
 
-async function runInjectedPayload(options) {
+async function runInjectedPayload(options: RunOptions) {
   const href = options.href || 'https://chatgpt.com/c/named-keep';
   const location = new URL(href);
-  let created = null;
-  const gm = {};
-  const calls = [];
-  const context = {
+  let created: Banner | null = null;
+  const gm: Record<string, unknown> = {};
+  const calls: FetchCall[] = [];
+  const context: PayloadVm = {
     location,
     document: {
       body: { prepend() {} },
@@ -110,7 +170,7 @@ async function runInjectedPayload(options) {
         return created;
       },
     },
-    fetch: async (url, init = {}) => {
+    fetch: async (url: string, init: FetchInit = {}) => {
       calls.push({
         url: String(url),
         method: init.method || 'GET',
@@ -119,8 +179,9 @@ async function runInjectedPayload(options) {
       });
       return options.fetchImpl(String(url), init);
     },
-    GM_getValue: (key, fallback) => (Object.prototype.hasOwnProperty.call(gm, key) ? gm[key] : fallback),
-    GM_setValue: (key, value) => {
+    GM_getValue: (key: string, fallback?: unknown) =>
+      Object.prototype.hasOwnProperty.call(gm, key) ? gm[key] : fallback,
+    GM_setValue: (key: string, value: unknown) => {
       gm[key] = value;
     },
     crypto: { randomUUID: () => '11111111-1111-4111-8111-111111111111' },
@@ -160,7 +221,11 @@ async function runInjectedPayload(options) {
     }
     await new Promise(resolve => setTimeout(resolve, 10));
   }
-  return { result: context.__nanoChatGptOrganize, calls, banner: created, gm };
+  const result = context.__nanoChatGptOrganize;
+  if (!result) {
+    throw new Error('payload did not set __nanoChatGptOrganize');
+  }
+  return { result, calls, banner: created, gm };
 }
 
 describe('chatgpt-organize injected payload (mocked fetch)', () => {
@@ -357,9 +422,10 @@ describe('chatgpt-organize injected payload (mocked fetch)', () => {
       expect.objectContaining({ id: 'scrap-rename', action: 'rename', ok: false }),
     ]);
     expect(result.error).toMatch(/401/);
-    expect(gm['chatgpt-organize:last-inventory'].scrap).toBeUndefined();
-    expect(gm['chatgpt-organize:last-inventory'].preview).toBeUndefined();
-    expect(JSON.stringify(gm['chatgpt-organize:last-inventory'])).not.toMatch(/Compare local vLLM/);
+    const inventory = gm['chatgpt-organize:last-inventory'] as Record<string, unknown> | undefined;
+    expect(inventory?.scrap).toBeUndefined();
+    expect(inventory?.preview).toBeUndefined();
+    expect(JSON.stringify(inventory)).not.toMatch(/Compare local vLLM/);
     expect(JSON.stringify(result)).not.toMatch(/"preview"/);
     expect(calls.filter(call => call.method === 'PATCH')).toHaveLength(1);
   });
@@ -646,5 +712,6 @@ describe('chatgpt-organize catalog gates', () => {
     expect(src).toContain('LIST_PAGE_CAP');
     expect(src).toContain('organizeSignal()');
     expect(src).not.toMatch(/Object\.values\(mapping\)/);
+    expect(src).toContain('for (const queued of fetchQueue)');
   });
 });

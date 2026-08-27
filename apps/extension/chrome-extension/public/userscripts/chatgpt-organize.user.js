@@ -328,9 +328,12 @@
 
     let renameCount = 0;
     const mutationById = {};
-    // Title-only. Skip unfetched / failed JSON / empty-or-short preview. Never archive.
-    for (const item of scrapItems) {
+    const scrapById = new Map(scrapItems.map(item => [item.id, item]));
+    // Title-only. Mutate only fetched scraps. Never archive on missing JSON, empty preview, or short chats.
+    for (const queued of fetchQueue) {
       throwIfCancelled();
+      const item = scrapById.get(queued.id);
+      if (!item) continue;
       const raw = jsonById[item.id];
       if (!raw || raw.error) continue;
       const preview = firstUserPreview(raw);
