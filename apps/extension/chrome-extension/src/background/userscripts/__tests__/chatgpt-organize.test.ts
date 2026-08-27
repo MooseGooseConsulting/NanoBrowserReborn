@@ -431,17 +431,29 @@ describe('chatgpt-organize injected payload (mocked fetch)', () => {
         throw new Error('fetch should not run');
       },
     });
-    expect(result.error).toMatch(/chatgpt.com \/ chat.openai.com/);
+    expect(result.error).toMatch(/only allowed on chatgpt.com/);
+    expect(calls).toEqual([]);
+  });
+
+  it('does not fetch on chat.openai.com because it 308s and does not serve /backend-api', async () => {
+    const { result, calls } = await runInjectedPayload({
+      href: 'https://chat.openai.com/c/abc',
+      fetchImpl: async () => {
+        throw new Error('fetch should not run');
+      },
+    });
+    expect(result.error).toMatch(/only allowed on chatgpt.com/);
     expect(calls).toEqual([]);
   });
 });
 
 describe('chatgpt-organize catalog gates', () => {
-  it('allows chatgpt.com and chat.openai.com, not www hosts', () => {
-    expect(REVIEWED_USERSCRIPT_HOSTS[CHATGPT_ORGANIZE_SCRIPT_ID]).toEqual(['chatgpt.com', 'chat.openai.com']);
+  it('allows chatgpt.com only; chat.openai.com and www hosts do not serve /backend-api', () => {
+    expect(REVIEWED_USERSCRIPT_HOSTS[CHATGPT_ORGANIZE_SCRIPT_ID]).toEqual(['chatgpt.com']);
     expect(REVIEWED_USERSCRIPT_HOSTS[CHATGPT_ORGANIZE_SCRIPT_ID]).not.toContain('www.chatgpt.com');
+    expect(REVIEWED_USERSCRIPT_HOSTS[CHATGPT_ORGANIZE_SCRIPT_ID]).not.toContain('chat.openai.com');
     expect(() => assertUserscriptOrigin(CHATGPT_ORGANIZE_SCRIPT_ID, 'https://chatgpt.com/c/abc')).not.toThrow();
-    expect(() => assertUserscriptOrigin(CHATGPT_ORGANIZE_SCRIPT_ID, 'https://chat.openai.com/chat')).not.toThrow();
+    expect(() => assertUserscriptOrigin(CHATGPT_ORGANIZE_SCRIPT_ID, 'https://chat.openai.com/chat')).toThrow(URLNotAllowedError);
     expect(() => assertUserscriptOrigin(CHATGPT_ORGANIZE_SCRIPT_ID, 'https://www.chatgpt.com/')).toThrow(URLNotAllowedError);
     expect(() => assertUserscriptOrigin(CHATGPT_ORGANIZE_SCRIPT_ID, 'https://www.chat.openai.com/')).toThrow(
       URLNotAllowedError,

@@ -233,14 +233,15 @@ describe('userscript registration helper', () => {
     expect(calls.executeScript).toHaveLength(0);
   });
 
-  it('allows chatgpt-organize on chat.openai.com and rejects www.chatgpt.com', async () => {
+  it('rejects chatgpt-organize on chat.openai.com and www.chatgpt.com', async () => {
     const { api, calls } = eventMockChrome({ nativeUserScripts: true });
-    await registerAndRunReviewedUserscript(api, {
-      scriptId: CHATGPT_ORGANIZE_SCRIPT_ID,
-      tabId: 7,
-      tabUrl: 'https://chat.openai.com/c/abc',
-    });
-    expect(calls.contentRegister).toHaveLength(1);
+    await expect(
+      registerAndRunReviewedUserscript(api, {
+        scriptId: CHATGPT_ORGANIZE_SCRIPT_ID,
+        tabId: 7,
+        tabUrl: 'https://chat.openai.com/c/abc',
+      }),
+    ).rejects.toBeInstanceOf(URLNotAllowedError);
     await expect(
       registerAndRunReviewedUserscript(api, {
         scriptId: CHATGPT_ORGANIZE_SCRIPT_ID,
@@ -248,7 +249,8 @@ describe('userscript registration helper', () => {
         tabUrl: 'https://www.chatgpt.com/',
       }),
     ).rejects.toBeInstanceOf(URLNotAllowedError);
-    expect(REVIEWED_USERSCRIPT_HOSTS[CHATGPT_ORGANIZE_SCRIPT_ID]).toEqual(['chatgpt.com', 'chat.openai.com']);
+    expect(calls.contentRegister).toHaveLength(0);
+    expect(REVIEWED_USERSCRIPT_HOSTS[CHATGPT_ORGANIZE_SCRIPT_ID]).toEqual(['chatgpt.com']);
   });
 
   it('keys filesForMode by scriptId, not a module global', () => {

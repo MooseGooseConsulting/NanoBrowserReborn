@@ -21,7 +21,7 @@ Do **not** implement items 3–4 in the current PR. Do **not** open a second PR 
 
 Reviewed payload `chatgpt-organize` **organizes** scrap ChatGPT chats via same-origin `fetch` (session cookie → `/api/auth/session` → conversation JSON → PATCH title). Not a catalog-id stub. Not `click_element`. Not a new runner.
 
-- Origin lock: `chatgpt.com` and `chat.openai.com` (no www hosts). Encoded in `REVIEWED_USERSCRIPT_HOSTS` (catalog) so `register.ts` stays untouched.
+- Origin lock: `chatgpt.com` only. `chat.openai.com` 308s to chatgpt.com and does not serve `/backend-api`; www hosts are also omitted. Encoded in `REVIEWED_USERSCRIPT_HOSTS` (catalog) so `register.ts` stays untouched.
 - File lists stay keyed by `scriptId` (`filesForMode(mode, scriptId)` from PR #2). There is no module-global payload selector. The organize builder path fail-closes if the selected id and the files about to be injected disagree.
 - One-shot **executeScript only** for `chatgpt-organize` (does not `registerContentScripts`). Builder sets `__nanoOrganizeRun` in MAIN, injects, **waits for `__nanoChatGptOrganize.done`**, then unregisters leftover organize ids. Sticky content-script reruns skip. Signed-out / 401 is an **action error**. `register.ts` is not edited in this PR (`persistAcrossSessions: false` already comes from #2).
 - Title only. Never archive on missing JSON, empty preview, or short chats (`titleFromPreview` requires 8+ characters).

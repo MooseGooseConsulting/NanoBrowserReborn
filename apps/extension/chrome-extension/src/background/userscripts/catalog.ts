@@ -19,11 +19,11 @@ const PAYLOAD_FILE_BY_ID: Record<ReviewedUserscriptId, string> = {
 /**
  * Hostnames the payload may run on. Empty means any injectable http(s) tab.
  * chatgpt-organize is origin-locked; the organize body is public/userscripts/chatgpt-organize.user.js.
- * www hosts are omitted (they do not serve /backend-api the same way).
+ * Only chatgpt.com serves /backend-api. chat.openai.com 308s there; www hosts 301.
  */
 export const REVIEWED_USERSCRIPT_HOSTS: Record<ReviewedUserscriptId, readonly string[]> = {
   [FIXTURE_SCRIPT_ID]: [],
-  [CHATGPT_ORGANIZE_SCRIPT_ID]: ['chatgpt.com', 'chat.openai.com'],
+  [CHATGPT_ORGANIZE_SCRIPT_ID]: ['chatgpt.com'],
 };
 
 export type UserscriptRegistrationMode = 'chrome.scripting.registerContentScripts' | 'chrome.userScripts';

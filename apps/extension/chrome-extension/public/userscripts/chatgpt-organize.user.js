@@ -6,7 +6,6 @@
    */
   const ALLOWED_HOSTS = {
     'chatgpt.com': true,
-    'chat.openai.com': true,
   };
   const LIST_LIMIT = 100;
   const LIST_PAGE_CAP = 3;
@@ -250,7 +249,7 @@
     globalThis.__nanoOrganizeRun = undefined;
 
     if (!allowedOrigin()) {
-      result.error = `chatgpt-organize is only allowed on chatgpt.com / chat.openai.com (host: ${location.hostname})`;
+      result.error = `chatgpt-organize is only allowed on chatgpt.com (host: ${location.hostname})`;
       finish();
       return;
     }

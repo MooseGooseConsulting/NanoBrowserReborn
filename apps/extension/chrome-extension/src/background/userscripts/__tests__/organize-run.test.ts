@@ -48,6 +48,7 @@ describe('chatgpt-organize action wait helpers', () => {
     expect(() => assertChatGptOrganizeTabAllowed('https://example.com/')).toThrow(URLNotAllowedError);
     expect(() => assertChatGptOrganizeTabAllowed('chrome://extensions')).toThrow(URLNotAllowedError);
     expect(() => assertChatGptOrganizeTabAllowed('https://www.chatgpt.com/')).toThrow(URLNotAllowedError);
+    expect(() => assertChatGptOrganizeTabAllowed('https://chat.openai.com/c/abc')).toThrow(URLNotAllowedError);
   });
 
   it('arm-then-wait does not resolve from a stale prior done: true', async () => {
