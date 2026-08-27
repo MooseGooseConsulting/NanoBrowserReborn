@@ -42,6 +42,7 @@ Common action sequences:
 - Form filling: [{"input_text": {"intent": "Fill title", "index": 1, "text": "username"}}, {"input_text": {"intent": "Fill title", "index": 2, "text": "password"}}, {"click_element": {"intent": "Click submit button", "index": 3}}]
 - Navigation: [{"go_to_url": {"intent": "Go to url", "url": "https://example.com"}}]
 - Userscript payload: [{"run_userscript": {"intent": "Inject reviewed payload", "script_id": "fixture"}}]
+- Hyperagent observe (hyperagent.com or www.hyperagent.com only): [{"run_userscript": {"intent": "Observe Hyperagent run rows", "script_id": "hyperagent-observe"}}]
 - Rewrite payload overlay: [{"rewrite_userscript": {"intent": "Keep payload current", "script_id": "chatgpt-organize", "source": "( () => { ... } )();"}}]
 - Restore packaged seed: [{"rewrite_userscript": {"intent": "Reset overlay", "script_id": "chatgpt-organize", "reset": true}}]
 - Keep-current organize recovery (once): first [{"rewrite_userscript": {"intent": "Repair chatgpt-organize overlay", "script_id": "chatgpt-organize", "source": "<repaired userscript from KEEP_CURRENT_PAYLOAD>"}}]. Only then [{"run_userscript": {"intent": "Re-run organize with overlay", "script_id": "chatgpt-organize"}}]. If rewrite returns an error, do not run_userscript with the previous overlay or seed.
@@ -100,7 +101,9 @@ Common action sequences:
 - script_id "fixture" is banner/counter inject proof.
 - script_id "chatgpt-organize" is the real organize job on chatgpt.com: one-shot executeScript (not a sticky content script), same-origin fetch (session cookie → conversation JSON) then PATCH titles on scrap/untitled chats. The action waits until organize finishes. Signed-out or 401 is a failed action. Overlay runs keep the same origin lock and waiter. Do not archive. Do not treat fixture injection as organize complete.
 - Keep-current loop: if a chatgpt-organize run fails with a KEEP_CURRENT Action error (timeout waiting for __nanoChatGptOrganize.done, or contract/action drift from seed), the accompanying Action result KEEP_CURRENT_PAYLOAD is the same overlay or seed bytes Chrome just ran — not a successful organize. Repair those bytes, keep the same contract tokens and same-origin fetch title PATCH semantics, call rewrite_userscript with the repaired overlay, then run_userscript once only after rewrite succeeds. Do not rewrite for signed-out, 401, origin lock, or overlapping organize. If KEEP_CURRENT already_retried, stop; do not loop.
+- script_id "hyperagent-observe" is the Hyperagent OBSERVE payload: same-origin GET of /api/threads/{id}/status, /usage, /usage-breakdown, /api/threads/{id} plus SSE /api/events/stream. Zero DOM scrape. One row per run. Observe only — no PATCH/POST to Hyperagent and no MCP OAuth. Use run_userscript with this id ONLY when the current tab origin is hyperagent.com or www.hyperagent.com. Do NOT claim this payload can run on other sites.
 - Do NOT use click_element to organize or export ChatGPT chats.
+- Do NOT use click_element to observe Hyperagent threads. That job is script_id "hyperagent-observe" on hyperagent.com or www.hyperagent.com only.
 
 11. Extraction:
 

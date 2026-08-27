@@ -11,6 +11,8 @@ import {
   filesForMode,
   FIXTURE_FILE,
   FIXTURE_SCRIPT_ID,
+  HYPERAGENT_OBSERVE_FILE,
+  HYPERAGENT_OBSERVE_SCRIPT_ID,
   PACKAGED_MODE_FILE,
   REVIEWED_USERSCRIPT_HOSTS,
   USER_SCRIPTS_MODE_FILE,
@@ -182,6 +184,7 @@ describe('userscript registration helper', () => {
     expect(allUserScriptIds()).toEqual([
       'nano-userscript-fixture',
       'nano-userscript-chatgpt-organize',
+      'nano-userscript-hyperagent-observe',
     ]);
   });
 
@@ -218,6 +221,39 @@ describe('userscript registration helper', () => {
     expect(calls.contentUnregister[1]).toEqual({ ids: allContentScriptIds() });
     expect(firstScript(calls.contentRegister[1]).id).toBe('nano-userscript-packaged-chatgpt-organize');
     expect(firstScript(calls.contentRegister[1]).js).not.toContain(FIXTURE_FILE);
+  });
+
+  it('injects hyperagent-observe.user.js, not fixture, with no prior select', async () => {
+    const { api, calls } = eventMockChrome({ nativeUserScripts: true });
+    const result = await registerAndRunReviewedUserscript(api, {
+      scriptId: HYPERAGENT_OBSERVE_SCRIPT_ID,
+      tabId: 7,
+      tabUrl: 'https://hyperagent.com/thread/abc',
+    });
+    expect(result.scriptId).toBe(HYPERAGENT_OBSERVE_SCRIPT_ID);
+    expect(result.js).toEqual([PACKAGED_MODE_FILE, COMPAT_FILE, HYPERAGENT_OBSERVE_FILE]);
+    expect(result.js).not.toContain(FIXTURE_FILE);
+    expect(firstScript(calls.contentRegister[0]).js).toEqual([
+      PACKAGED_MODE_FILE,
+      COMPAT_FILE,
+      HYPERAGENT_OBSERVE_FILE,
+    ]);
+    expect(calls.executeScript[0]).toMatchObject({
+      files: [PACKAGED_MODE_FILE, COMPAT_FILE, HYPERAGENT_OBSERVE_FILE],
+    });
+  });
+
+  it('rejects hyperagent-observe off hyperagent.com inside the helper', async () => {
+    const { api, calls } = eventMockChrome({ nativeUserScripts: true });
+    await expect(
+      registerAndRunReviewedUserscript(api, {
+        scriptId: HYPERAGENT_OBSERVE_SCRIPT_ID,
+        tabId: 7,
+        tabUrl: 'https://example.com/chat',
+      }),
+    ).rejects.toBeInstanceOf(URLNotAllowedError);
+    expect(calls.contentRegister).toHaveLength(0);
+    expect(calls.executeScript).toHaveLength(0);
   });
 
   it('rejects chatgpt-organize off chatgpt.com inside the helper', async () => {
@@ -268,6 +304,11 @@ describe('userscript registration helper', () => {
       USER_SCRIPTS_MODE_FILE,
       COMPAT_FILE,
       CHATGPT_ORGANIZE_FILE,
+    ]);
+    expect(filesForMode('chrome.scripting.registerContentScripts', HYPERAGENT_OBSERVE_SCRIPT_ID)).toEqual([
+      PACKAGED_MODE_FILE,
+      COMPAT_FILE,
+      HYPERAGENT_OBSERVE_FILE,
     ]);
     expect(() => filesForMode('chrome.scripting.registerContentScripts', 'chatgpt-export')).toThrow(
       /Unknown reviewed userscript id/,
@@ -361,8 +402,13 @@ describe('run_userscript action schema', () => {
     expect(runUserscriptActionSchema.schema.parse({ script_id: CHATGPT_ORGANIZE_SCRIPT_ID }).script_id).toBe(
       CHATGPT_ORGANIZE_SCRIPT_ID,
     );
+    expect(runUserscriptActionSchema.schema.parse({ script_id: HYPERAGENT_OBSERVE_SCRIPT_ID }).script_id).toBe(
+      HYPERAGENT_OBSERVE_SCRIPT_ID,
+    );
     expect(() => runUserscriptActionSchema.schema.parse({ script_id: 'not-a-payload' })).toThrow();
     expect(() => runUserscriptActionSchema.schema.parse({ script_id: 'chatgpt-export' })).toThrow();
+    expect(runUserscriptActionSchema.description).toMatch(/hyperagent-observe/);
+    expect(runUserscriptActionSchema.description).toMatch(/hyperagent\.com only/);
   });
 });
 
@@ -375,6 +421,14 @@ describe('navigator userscript prompt', () => {
     expect(navigatorSystemPromptTemplate).not.toMatch(/does not organize or export chats/);
     expect(navigatorSystemPromptTemplate).toMatch(/overlay/);
     expect(navigatorSystemPromptTemplate).toMatch(/rewrite_userscript/);
+  });
+
+  it('allows hyperagent-observe only on hyperagent.com', () => {
+    expect(navigatorSystemPromptTemplate).toContain('script_id "hyperagent-observe"');
+    expect(navigatorSystemPromptTemplate).toMatch(/ONLY when the current tab origin is hyperagent\.com/);
+    expect(navigatorSystemPromptTemplate).toMatch(/Do NOT claim this payload can run on other sites/);
+    expect(navigatorSystemPromptTemplate).toMatch(/no PATCH\/POST to Hyperagent/);
+    expect(navigatorSystemPromptTemplate).toMatch(/no MCP OAuth/);
   });
 });
 
