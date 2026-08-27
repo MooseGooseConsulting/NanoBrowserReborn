@@ -12,8 +12,8 @@ Do **not** implement item 3 in the current PR. Do **not** open a second PR for i
 
 ## The only plan
 
-1. **On main** — `run_userscript` runner + fixture payload (#2) and ChatGPT organize payload (#9). Squash-merged as `89ca7cf`. Not open.
-2. **This PR** — payload rewrite / keep-current. Overlays in `chrome.storage.local` so reviewed payloads can be updated without a rebuild.
+1. **On main** — `run_userscript` runner + fixture (#2), ChatGPT organize (#9, `89ca7cf`), and `rewrite_userscript` overlay (#10, `0544b74`). Not open.
+2. **This PR** — operational keep-current loop. Leader/Navigator detects a failed chatgpt-organize run, calls `rewrite_userscript` with a repaired overlay, then `run_userscript` again.
 3. **Later, not this week** — Hyperagent observe; Stagehand host after a real CDP 5-step; four-state completion; MCP/REST; LangGraph; marks/SAM.
 
 ## On main (item 1)
@@ -21,19 +21,19 @@ Do **not** implement item 3 in the current PR. Do **not** open a second PR for i
 - #2 `run_userscript` runner + fixture. File lists keyed by `filesForMode(mode, scriptId)`.
 - #6/#7 Extension CI (type-check, test, build).
 - #9 `chatgpt-organize` reviewed payload. Origin lock `chatgpt.com` only. One-shot executeScript (no sticky register). Per-tab serialize. Same-origin fetch → PATCH title. Signed-out / 401 / PATCH `success:false` / total detail-fetch failure are action errors. `register.ts` was not edited in #9.
+- #10 `rewrite_userscript` overlay in `chrome.storage.local`. Packaged `public/userscripts/*.user.js` stay the seed. Run injects overlay when present (`chrome.userScripts.execute({ code })` when available, otherwise executeScript func/args). Contract tokens required before persist. Leftover packaged registrations are cleared first.
 
 ## This PR (item 2)
 
-`rewrite_userscript` stores a rewritten overlay keyed by reviewed script id. Chrome cannot write packaged `public/userscripts/*.user.js` files; those stay the reviewed seed. `run_userscript` injects the overlay when present (`world: MAIN`, never a page URL): `chrome.userScripts.execute({ code })` when available so page CSP cannot block keep-current payloads, otherwise `chrome.scripting.executeScript` func/args. Leftover packaged registrations are cleared first. Otherwise the packaged seed.
+The missing control pipeline so rewrite actually serves "several times a day":
 
-- Known reviewed ids only (`fixture`, `chatgpt-organize`). Unknown ids fail closed.
-- Source must be non-empty, look like a userscript IIFE, and include the payload identity hook the runner already waits on. Reject `chrome://`, `chrome-extension://`, `javascript:`, `data:` tricks. Size-cap the source.
-- Persist `{ scriptId, source, rewrittenAt, sourceHash }`. Return a short ACT_OK with id + hash. Do **not** execute the new source as part of rewrite.
-- `reset: true` deletes the overlay and falls back to the seed.
-- Overlay `scriptId` must match the selected id (fixture overlay cannot run as chatgpt-organize).
-- Organize overlay runs still origin-lock `chatgpt.com`, serialize per tab, and wait for `__nanoChatGptOrganize.done`.
-- Tests inject the **same bytes Chrome would run**: overlay source when set; otherwise `chatgpt-organize.user.js` under `public/userscripts/`. No parallel TS reimplementation. No live ChatGPT. No login in CI.
-- `register.ts` is not edited. Navigator prompt / `run_userscript` schema mention overlay vs seed honestly. Rewrite is not `registerContentScripts`.
+- Classify a failed chatgpt-organize run: timeout waiting for `__nanoChatGptOrganize.done`, or contract/action error from seed drift, is **keep-current eligible**.
+- Signed-out, 401, origin lock, and overlapping in-flight organize are **not** keep-current. Those stay ordinary action errors.
+- Surface classification in `ActionResult` so Navigator memory sees it (`KEEP_CURRENT` on one error line; `KEEP_CURRENT_PAYLOAD` is the same overlay or seed bytes Chrome would inject).
+- Navigator then calls `rewrite_userscript` with a repaired overlay (same contract tokens / same-origin fetch title PATCH semantics) and `run_userscript` once. Cap: one rewrite-then-run per script id per task.
+- Origin lock stays `chatgpt.com` only. No archive. No blob/data URL inject. Prefer `chrome.userScripts.execute` when available.
+- Tests inject the **same bytes** Chrome would run (overlay or seed `.user.js`). No parallel TS reimplementation of the userscript. No ChatGPT login in CI.
+- `register.ts` is not edited. Stay in `apps/extension`. Do not touch Hyperagent observe, Stagehand, four-state, marks/SAM, LangGraph, or MCP/REST.
 
 Do **not** start Hyperagent observe, Stagehand, four-state completion, MCP/REST, LangGraph, or marks in this PR. Do not add `hyperagent-observe` to the catalog.
 
@@ -54,7 +54,7 @@ No host code until that CDP 5-step has been run once. Do not start with MarkMap,
 
 **Mocked unit tests are not enough.**
 
-**Human gate for this PR:** rewrite a payload, run it on a real http(s) tab, see the overlay take effect. **chatgpt-organize still needs a logged-in `chatgpt.com` tab** to be proven. Characterization still holds: Navigator is required to start a task; the side panel must not say ready without Navigator (`drop/handoff/CODE_CONFIGURATION_FINDINGS.md`).
+**Human gate for this PR:** logged-in `chatgpt.com` organize proof of the keep-current loop (fail → rewrite overlay → run again). Rewrite a payload on a real http(s) tab and see the overlay take effect. Characterization still holds: Navigator is required to start a task; the side panel must not say ready without Navigator (`drop/handoff/CODE_CONFIGURATION_FINDINGS.md`).
 
 Do not block this PR on the human gate.
 
@@ -64,7 +64,7 @@ Automated coverage (necessary, not sufficient):
 pnpm -F chrome-extension test
 ```
 
-Must cover rewrite accept/reject/reset, overlay inject vs seed, organize origin lock / wait-for-done / signed-out with seed and overlay, and id-mismatch fail-closed. Fixture inject-proof stays. No ChatGPT login in CI.
+Must cover keep-current eligible vs not-eligible classify, timeout/contract observation carrying the same overlay or seed bytes Chrome would run, one rewrite-then-run cap, signed-out/401 not triggering rewrite guidance, and existing rewrite/organize/fixture inject-proof. No ChatGPT login in CI.
 
 From `apps/extension` after `corepack pnpm install`, still run:
 

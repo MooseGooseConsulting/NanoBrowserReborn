@@ -393,6 +393,7 @@ describe('rewrite_userscript action schema and navigator prompt', () => {
     expect(navigatorSystemPromptTemplate).toMatch(/rewrite_userscript/);
     expect(navigatorSystemPromptTemplate).toMatch(/userScripts\.execute/);
     expect(navigatorSystemPromptTemplate).toMatch(/"reset": true/);
+    expect(navigatorSystemPromptTemplate).toMatch(/KEEP_CURRENT_PAYLOAD/);
     expect(navigatorSystemPromptTemplate).not.toMatch(/catalog hook/);
   });
 });
