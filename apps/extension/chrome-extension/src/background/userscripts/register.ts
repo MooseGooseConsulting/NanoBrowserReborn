@@ -2,9 +2,13 @@ import { isUrlAllowed } from '@src/background/browser/util';
 import { URLNotAllowedError } from '@src/background/browser/views';
 import { createLogger } from '@src/background/log';
 import {
+  allContentScriptIds,
+  allUserScriptIds,
   contentScriptIdFor,
   filesForMode,
   isReviewedUserscriptId,
+  REVIEWED_USERSCRIPT_HOSTS,
+  type ReviewedUserscriptId,
   type UserscriptRegistrationMode,
   userScriptIdFor,
 } from './catalog';
@@ -142,33 +146,38 @@ export function resolveRegistrationMatches(
   return candidates;
 }
 
-async function clearRegistrations(
-  api: UserscriptChromeApi,
-  contentScriptId: string,
-  userScriptId: string,
-): Promise<void> {
+/**
+ * Drop every reviewed registration, not only the id about to run. Sticky leftover
+ * scripts from a previous id (fixture then organize) must not stay on the origin.
+ */
+async function clearRegistrations(api: UserscriptChromeApi): Promise<void> {
   try {
     if (api.userScripts) {
-      await api.userScripts.unregister({ ids: [userScriptId] });
+      await api.userScripts.unregister({ ids: allUserScriptIds() });
     }
   } catch (error) {
     logger.warning('unregister userScripts failed', error);
   }
   try {
-    await api.scripting.unregisterContentScripts({ ids: [contentScriptId] });
+    await api.scripting.unregisterContentScripts({ ids: allContentScriptIds() });
   } catch (error) {
     logger.warning('unregisterContentScripts failed', error);
   }
 }
 
-async function runOnTab(api: UserscriptChromeApi, tabId: number, mode: UserscriptRegistrationMode): Promise<void> {
+async function runOnTab(
+  api: UserscriptChromeApi,
+  tabId: number,
+  mode: UserscriptRegistrationMode,
+  scriptId: string,
+): Promise<void> {
   // Immediate inject always uses chrome.scripting.executeScript (works without Chrome 135+
   // userScripts.execute). Registration may still use chrome.userScripts.register as fallback.
   await api.scripting.executeScript({
     target: { tabId },
     world: WORLD,
     injectImmediately: true,
-    files: filesForMode(mode),
+    files: filesForMode(mode, scriptId),
   });
 }
 
@@ -185,10 +194,26 @@ function successResult(
     contentScriptId: contentScriptIdFor(options.scriptId),
     userScriptId: userScriptIdFor(options.scriptId),
     matches,
-    js: filesForMode(mode),
+    js: filesForMode(mode, options.scriptId),
     ran: true,
     packagedError,
   };
+}
+
+export function assertUserscriptOrigin(scriptId: ReviewedUserscriptId, tabUrl: string): void {
+  const hosts = REVIEWED_USERSCRIPT_HOSTS[scriptId];
+  if (!hosts.length) {
+    return;
+  }
+  let hostname: string;
+  try {
+    hostname = new URL(tabUrl).hostname;
+  } catch {
+    throw new URLNotAllowedError(`URL: ${tabUrl} is not allowed`);
+  }
+  if (!hosts.includes(hostname)) {
+    throw new URLNotAllowedError(`Userscript ${scriptId} is not allowed on ${hostname}`);
+  }
 }
 
 export async function registerAndRunReviewedUserscript(
@@ -203,10 +228,12 @@ export async function registerAndRunReviewedUserscript(
     throw new Error(`Unknown reviewed userscript id: ${scriptId}`);
   }
 
+  assertUserscriptOrigin(scriptId, tabUrl);
+
   const matches = resolveRegistrationMatches(tabUrl, options.matches, allowList, denyList);
   const contentScriptId = contentScriptIdFor(scriptId);
   const userScriptId = userScriptIdFor(scriptId);
-  await clearRegistrations(api, contentScriptId, userScriptId);
+  await clearRegistrations(api);
 
   let packagedError: string | undefined;
   let packagedRegistered = false;
@@ -217,8 +244,8 @@ export async function registerAndRunReviewedUserscript(
         matches,
         runAt: RUN_AT,
         world: WORLD,
-        persistAcrossSessions: true,
-        js: filesForMode('chrome.scripting.registerContentScripts'),
+        persistAcrossSessions: false,
+        js: filesForMode('chrome.scripting.registerContentScripts', scriptId),
       },
     ]);
     packagedRegistered = true;
@@ -228,10 +255,10 @@ export async function registerAndRunReviewedUserscript(
 
   if (packagedRegistered) {
     try {
-      await runOnTab(api, tabId, 'chrome.scripting.registerContentScripts');
+      await runOnTab(api, tabId, 'chrome.scripting.registerContentScripts', scriptId);
       return successResult(options, 'chrome.scripting.registerContentScripts', matches);
     } catch (error) {
-      await clearRegistrations(api, contentScriptId, userScriptId);
+      await clearRegistrations(api);
       throw error;
     }
   }
@@ -248,15 +275,16 @@ export async function registerAndRunReviewedUserscript(
       matches,
       runAt: RUN_AT,
       world: WORLD,
-      js: filesForMode('chrome.userScripts').map(file => ({ file })),
+      persistAcrossSessions: false,
+      js: filesForMode('chrome.userScripts', scriptId).map(file => ({ file })),
     },
   ]);
 
   try {
-    await runOnTab(api, tabId, 'chrome.userScripts');
+    await runOnTab(api, tabId, 'chrome.userScripts', scriptId);
     return successResult(options, 'chrome.userScripts', matches, packagedError);
   } catch (error) {
-    await clearRegistrations(api, contentScriptId, userScriptId);
+    await clearRegistrations(api);
     throw error;
   }
 }

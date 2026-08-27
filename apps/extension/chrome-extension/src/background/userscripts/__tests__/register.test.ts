@@ -2,7 +2,18 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { COMPAT_FILE, FIXTURE_FILE, PACKAGED_MODE_FILE, USER_SCRIPTS_MODE_FILE } from '../catalog';
+import {
+  allContentScriptIds,
+  allUserScriptIds,
+  CHATGPT_ORGANIZE_FILE,
+  CHATGPT_ORGANIZE_SCRIPT_ID,
+  COMPAT_FILE,
+  filesForMode,
+  FIXTURE_FILE,
+  FIXTURE_SCRIPT_ID,
+  PACKAGED_MODE_FILE,
+  USER_SCRIPTS_MODE_FILE,
+} from '../catalog';
 import { matchesForUrl, registerAndRunReviewedUserscript, RUN_AT, WORLD, type UserscriptChromeApi } from '../register';
 import { URLNotAllowedError } from '@src/background/browser/views';
 import { RUN_USERSCRIPT_ACTION, runUserscriptActionSchema } from '../../agent/actions/schemas';
@@ -92,7 +103,7 @@ describe('userscript registration helper', () => {
     };
     expect(registered.world).toBe(WORLD);
     expect(registered.runAt).toBe(RUN_AT);
-    expect(registered.persistAcrossSessions).toBe(true);
+    expect(registered.persistAcrossSessions).toBe(false);
     expect(registered.matches).toEqual(['https://example.com/*']);
     expect(registered.js).toEqual([PACKAGED_MODE_FILE, COMPAT_FILE, FIXTURE_FILE]);
     expect(calls.executeScript).toHaveLength(1);
@@ -114,10 +125,12 @@ describe('userscript registration helper', () => {
     const nativeScript = firstScript(calls.userRegister[0]) as {
       world: string;
       runAt: string;
+      persistAcrossSessions?: boolean;
       js: { file: string }[];
     };
     expect(nativeScript.world).toBe(WORLD);
     expect(nativeScript.runAt).toBe(RUN_AT);
+    expect(nativeScript.persistAcrossSessions).toBe(false);
     expect(nativeScript.js.map(x => x.file)).toEqual([USER_SCRIPTS_MODE_FILE, COMPAT_FILE, FIXTURE_FILE]);
     expect(result.packagedError).toContain('registerContentScripts unavailable');
     expect(calls.executeScript).toHaveLength(1);
@@ -160,11 +173,84 @@ describe('userscript registration helper', () => {
     );
   });
 
-  it('unregisters both ids before registering', async () => {
+  it('unregisters every reviewed id before registering, not only the current script', async () => {
     const { api, calls } = eventMockChrome({ nativeUserScripts: true });
     await registerAndRunReviewedUserscript(api, fixtureTarget);
-    expect(calls.userUnregister[0]).toEqual({ ids: ['nano-userscript-fixture'] });
-    expect(calls.contentUnregister[0]).toEqual({ ids: ['nano-userscript-packaged-fixture'] });
+    expect(calls.userUnregister[0]).toEqual({ ids: allUserScriptIds() });
+    expect(calls.contentUnregister[0]).toEqual({ ids: allContentScriptIds() });
+    expect(allUserScriptIds()).toEqual([
+      'nano-userscript-fixture',
+      'nano-userscript-chatgpt-organize',
+    ]);
+  });
+
+  it('injects chatgpt-organize.user.js, not fixture, when scriptId is chatgpt-organize with no prior select', async () => {
+    const { api, calls } = eventMockChrome({ nativeUserScripts: true });
+    const result = await registerAndRunReviewedUserscript(api, {
+      scriptId: CHATGPT_ORGANIZE_SCRIPT_ID,
+      tabId: 7,
+      tabUrl: 'https://chatgpt.com/c/abc',
+    });
+
+    expect(result.scriptId).toBe(CHATGPT_ORGANIZE_SCRIPT_ID);
+    expect(result.js).toEqual([PACKAGED_MODE_FILE, COMPAT_FILE, CHATGPT_ORGANIZE_FILE]);
+    expect(result.js).not.toContain(FIXTURE_FILE);
+    expect(firstScript(calls.contentRegister[0]).js).toEqual([
+      PACKAGED_MODE_FILE,
+      COMPAT_FILE,
+      CHATGPT_ORGANIZE_FILE,
+    ]);
+    expect(calls.executeScript[0]).toMatchObject({
+      files: [PACKAGED_MODE_FILE, COMPAT_FILE, CHATGPT_ORGANIZE_FILE],
+    });
+    expect(JSON.stringify(calls)).not.toContain(FIXTURE_FILE);
+  });
+
+  it('does not leave fixture registered after a later chatgpt-organize run', async () => {
+    const { api, calls } = eventMockChrome({ nativeUserScripts: true });
+    await registerAndRunReviewedUserscript(api, fixtureTarget);
+    await registerAndRunReviewedUserscript(api, {
+      scriptId: CHATGPT_ORGANIZE_SCRIPT_ID,
+      tabId: 7,
+      tabUrl: 'https://chatgpt.com/',
+    });
+    expect(calls.contentUnregister[1]).toEqual({ ids: allContentScriptIds() });
+    expect(firstScript(calls.contentRegister[1]).id).toBe('nano-userscript-packaged-chatgpt-organize');
+    expect(firstScript(calls.contentRegister[1]).js).not.toContain(FIXTURE_FILE);
+  });
+
+  it('rejects chatgpt-organize off chatgpt.com inside the helper', async () => {
+    const { api, calls } = eventMockChrome({ nativeUserScripts: true });
+    await expect(
+      registerAndRunReviewedUserscript(api, {
+        scriptId: CHATGPT_ORGANIZE_SCRIPT_ID,
+        tabId: 7,
+        tabUrl: 'https://example.com/chat',
+      }),
+    ).rejects.toBeInstanceOf(URLNotAllowedError);
+    expect(calls.contentRegister).toHaveLength(0);
+    expect(calls.executeScript).toHaveLength(0);
+  });
+
+  it('keys filesForMode by scriptId, not a module global', () => {
+    expect(filesForMode('chrome.scripting.registerContentScripts', FIXTURE_SCRIPT_ID)).toEqual([
+      PACKAGED_MODE_FILE,
+      COMPAT_FILE,
+      FIXTURE_FILE,
+    ]);
+    expect(filesForMode('chrome.scripting.registerContentScripts', CHATGPT_ORGANIZE_SCRIPT_ID)).toEqual([
+      PACKAGED_MODE_FILE,
+      COMPAT_FILE,
+      CHATGPT_ORGANIZE_FILE,
+    ]);
+    expect(filesForMode('chrome.userScripts', CHATGPT_ORGANIZE_SCRIPT_ID)).toEqual([
+      USER_SCRIPTS_MODE_FILE,
+      COMPAT_FILE,
+      CHATGPT_ORGANIZE_FILE,
+    ]);
+    expect(() => filesForMode('chrome.scripting.registerContentScripts', 'chatgpt-export')).toThrow(
+      /Unknown reviewed userscript id/,
+    );
   });
 
   it('blocks chrome:// and other non-injectable URLs before registration', async () => {
@@ -245,20 +331,25 @@ describe('userscript registration helper', () => {
 });
 
 describe('run_userscript action schema', () => {
-  it('defaults script_id to fixture and does not accept model matches', () => {
+  it('defaults script_id to fixture, uses the reviewed-id enum, and does not accept model matches', () => {
     expect(RUN_USERSCRIPT_ACTION).toBe('run_userscript');
     const parsed = runUserscriptActionSchema.schema.parse({ intent: 'inject proof' });
-    expect(parsed).toMatchObject({ intent: 'inject proof', script_id: 'fixture' });
+    expect(parsed).toMatchObject({ intent: 'inject proof', script_id: FIXTURE_SCRIPT_ID });
     expect(parsed).not.toHaveProperty('matches');
     expect(runUserscriptActionSchema.schema.parse({ intent: 'x', matches: ['*://*/*'] })).not.toHaveProperty('matches');
+    expect(runUserscriptActionSchema.schema.parse({ script_id: CHATGPT_ORGANIZE_SCRIPT_ID }).script_id).toBe(
+      CHATGPT_ORGANIZE_SCRIPT_ID,
+    );
+    expect(() => runUserscriptActionSchema.schema.parse({ script_id: 'not-a-payload' })).toThrow();
+    expect(() => runUserscriptActionSchema.schema.parse({ script_id: 'chatgpt-export' })).toThrow();
   });
 });
 
 describe('navigator userscript prompt', () => {
-  it('does not claim ChatGPT organize/export is a registered userscript payload', () => {
+  it('does not claim ChatGPT organize/export is implemented', () => {
     expect(navigatorSystemPromptTemplate).toContain('script_id "fixture"');
-    expect(navigatorSystemPromptTemplate).toMatch(/Do NOT use run_userscript for ChatGPT organize or export/);
-    expect(navigatorSystemPromptTemplate).toMatch(/That payload is not registered yet/);
+    expect(navigatorSystemPromptTemplate).toMatch(/catalog hook/);
+    expect(navigatorSystemPromptTemplate).toMatch(/does not organize or export chats/);
     expect(navigatorSystemPromptTemplate).not.toMatch(/That job is a userscript payload/);
   });
 });

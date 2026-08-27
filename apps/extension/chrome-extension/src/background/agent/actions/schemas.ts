@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { CHATGPT_ORGANIZE_SCRIPT_ID, FIXTURE_SCRIPT_ID } from '../../userscripts/catalog';
 
 export interface ActionSchema {
   name: string;
@@ -219,9 +220,12 @@ export const RUN_USERSCRIPT_ACTION = 'run_userscript';
 export const runUserscriptActionSchema: ActionSchema = {
   name: RUN_USERSCRIPT_ACTION,
   description:
-    'Register and run a reviewed userscript payload in the page MAIN world, scoped to the current tab origin. The only reviewed payload in this slice is script_id "fixture" (banner/counter inject proof). Do not use this action for ChatGPT organize or export; that payload is not registered yet.',
+    'Register and run a reviewed userscript payload in the page MAIN world, scoped to the current tab origin. script_id is a reviewed-id enum: "fixture" (banner/counter inject proof) or "chatgpt-organize" (catalog hook only; organize/fetch body is not implemented). Do not treat chatgpt-organize injection as organize or export complete.',
   schema: z.object({
     intent: z.string().default('').describe('purpose of this action'),
-    script_id: z.string().default('fixture').describe('reviewed payload id (fixture in this slice)'),
+    script_id: z
+      .enum([FIXTURE_SCRIPT_ID, CHATGPT_ORGANIZE_SCRIPT_ID])
+      .default(FIXTURE_SCRIPT_ID)
+      .describe('reviewed payload id'),
   }),
 };

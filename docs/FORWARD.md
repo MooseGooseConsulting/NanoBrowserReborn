@@ -19,15 +19,18 @@ Do **not** implement items 2–4 in the current PR. Do **not** open a second PR 
 
 ## This PR (item 1)
 
-Executor action `run_userscript` registers and runs a **reviewed** fixture banner/counter. That is the whole ship.
+Executor action `run_userscript` registers and runs a **reviewed** fixture banner/counter. That is the working payload.
 
-- Packaged `chrome.scripting.registerContentScripts` first (MAIN, `document_end`, `persistAcrossSessions`).
+- Packaged `chrome.scripting.registerContentScripts` first (MAIN, `document_end`, `persistAcrossSessions: false`).
 - Fall back to `chrome.userScripts.register` only when packaged **registration** itself fails.
 - Immediate run always `chrome.scripting.executeScript`. `chrome.userScripts.execute` is unused.
+- File lists are keyed by `scriptId` (`filesForMode(mode, scriptId)`). There is no module-global payload.
 - Matches: current-tab origin only, portless. No `http(s)://*/*` fallback. No model `*://*/*`.
+- Helper asserts the payload's allowed origin (`chatgpt-organize` → `chatgpt.com`). Not builder-only.
+- `clearRegistrations` drops every reviewed id, not only the one about to run.
 - BrowserContext allow/deny lists apply to the tab URL and to matches.
 - If packaged register succeeds and `runOnTab` fails: unregister and throw. Same cleanup on the userScripts path.
-- Navigator schema and prompt: only `fixture` is registered. Do not use `run_userscript` for ChatGPT organize.
+- Navigator `script_id` is the reviewed-id enum. `chatgpt-organize` is a catalog hook (stub file) so the runner cannot ship fixture for that id. Organize/fetch body is the next PR.
 
 Do **not** start Hyperagent, Stagehand, four-state completion, MCP/REST, LangGraph, or marks in this PR.
 

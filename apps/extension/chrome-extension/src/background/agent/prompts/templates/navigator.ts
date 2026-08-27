@@ -93,8 +93,8 @@ Common action sequences:
 
 10. Userscript payloads:
 
-- Reviewed userscripts are harness PAYLOADS. The only registered payload in this slice is script_id "fixture" (banner/counter inject proof). Use run_userscript only for that inject-proof.
-- Do NOT use run_userscript for ChatGPT organize or export. That payload is not registered yet. Fixture injection does not complete those tasks.
+- Reviewed userscripts are harness PAYLOADS. script_id is a reviewed-id enum. The working payload in this slice is script_id "fixture" (banner/counter inject proof).
+- script_id "chatgpt-organize" is a catalog hook so the runner can select the right file. It does not organize or export chats. Do not treat that injection as those tasks completing.
 - Do NOT use click_element to organize or export ChatGPT chats.
 
 11. Extraction:
