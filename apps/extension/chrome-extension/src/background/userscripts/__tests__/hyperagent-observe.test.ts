@@ -352,6 +352,25 @@ describe('hyperagent observe reducer', () => {
     expect(handleSseData(state, '{"type":"cost-updated","costDeltaUsd":0.0028}')).toBe('refresh');
     expect(state.streamEvents).toBe(1);
     expect(state.open?.streamCost).toBeCloseTo(0.0028);
+    applyObserveSnapshot(
+      state,
+      snap(statusWaiting(), usageBody(0.4785, null), breakdownBody(15_080_000), Date.parse('2026-08-27T12:30:24.114Z')),
+    );
+    expect(state.turns[0].costDelta).toBeCloseTo(0.0785);
+  });
+
+  it('falls back to SSE cost only when the usage totals did not move', () => {
+    const state = emptyObserveState(THREAD_ID);
+    applyObserveSnapshot(
+      state,
+      snap(statusRunning(), usageBody(0.4, null), breakdownBody(100), Date.parse('2026-08-27T12:06:00.000Z')),
+    );
+    handleSseData(state, '{"type":"cost-updated","costDeltaUsd":0.01}');
+    applyObserveSnapshot(
+      state,
+      snap(statusWaiting(), usageBody(0.4, null), breakdownBody(100), Date.parse('2026-08-27T12:30:24.114Z')),
+    );
+    expect(state.turns[0].costDelta).toBeCloseTo(0.01);
   });
 });
 
@@ -408,7 +427,7 @@ describe('hyperagent observe fetch + SSE pass (mocked)', () => {
     expect(result.threadId).toBe(THREAD_ID);
     expect(result.rows).toHaveLength(1);
     expect(result.rows[0].burn).toBe(430_000);
-    expect(result.rows[0].costDelta).toBeCloseTo(0.01);
+    expect(result.rows[0].costDelta).toBeCloseTo(0.0785);
     expect(result.streamEvents).toBe(1);
     expect(result.streamUp).toBe(true);
     expect(sseUrls).toEqual([`https://hyperagent.com/api/events/stream?threadId=${THREAD_ID}`]);
