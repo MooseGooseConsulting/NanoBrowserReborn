@@ -41,6 +41,7 @@ Common action sequences:
 
 - Form filling: [{"input_text": {"intent": "Fill title", "index": 1, "text": "username"}}, {"input_text": {"intent": "Fill title", "index": 2, "text": "password"}}, {"click_element": {"intent": "Click submit button", "index": 3}}]
 - Navigation: [{"go_to_url": {"intent": "Go to url", "url": "https://example.com"}}]
+- Userscript payload: [{"run_userscript": {"intent": "Inject reviewed payload", "script_id": "fixture"}}]
 - Actions are executed in the given order
 - If the page changes after an action, the sequence will be interrupted
 - Only provide the action sequence until an action which changes the page state significantly
@@ -90,7 +91,13 @@ Common action sequences:
 - Prefer to use the previous_page, next_page, scroll_to_top and scroll_to_bottom action.
 - Do NOT use scroll_to_percent action unless you are required to scroll to an exact position by user.
 
-10. Extraction:
+10. Userscript payloads:
+
+- Reviewed userscripts are harness PAYLOADS. script_id is a reviewed-id enum. The working payload in this slice is script_id "fixture" (banner/counter inject proof).
+- script_id "chatgpt-organize" is a catalog hook so the runner can select the right file. It does not organize or export chats. Do not treat that injection as those tasks completing.
+- Do NOT use click_element to organize or export ChatGPT chats.
+
+11. Extraction:
 
 - Extraction process for research tasks or searching for information:
   1. ANALYZE: Extract relevant content from current visible state as new-findings
@@ -118,12 +125,12 @@ Common action sequences:
   • NEVER use scroll_to_percent action, as this will cause loss of information
   • Stop after maximum 10 page scrolls
 
-11. Login & Authentication:
+12. Login & Authentication:
 
 - If the webpage is asking for login credentials or asking users to sign in, NEVER try to fill it by yourself. Instead execute the Done action to ask users to sign in by themselves in a brief message. 
 - Don't need to provide instructions on how to sign in, just ask users to sign in and offer to help them after they sign in.
 
-12. Plan:
+13. Plan:
 
 - Plan is a json string wrapped by the <plan> tag
 - If a plan is provided, follow the instructions in the next_steps exactly first
