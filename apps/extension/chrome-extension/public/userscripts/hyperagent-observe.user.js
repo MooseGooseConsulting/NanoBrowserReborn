@@ -1,0 +1,586 @@
+(() => {
+  /**
+   * Reviewed Hyperagent OBSERVE payload (Issue #1 build-order step 1).
+   * Same-origin GET + SSE. Zero DOM scrape. One row per run. No writes.
+   * No PATCH/POST to Hyperagent. No MCP OAuth.
+   */
+  const ALLOWED_HOSTS = {
+    'hyperagent.com': true,
+    'www.hyperagent.com': true,
+  };
+  const STOP_KEY = '__nanoHyperagentObserveStop';
+  const RUN_MS = 2000;
+  const IDLE_MS = 10000;
+  const MAX_TURNS = 300;
+  const MAX_CAPTURES = 5000;
+  const MAX_FETCHES = 40;
+  const FETCH_TIMEOUT_MS = 15000;
+
+  if (typeof globalThis[STOP_KEY] === 'function') {
+    try {
+      globalThis[STOP_KEY]();
+    } catch (error) {
+      // previous instance already gone
+    }
+  }
+
+  const result = {
+    loaded: true,
+    scriptId: 'hyperagent-observe',
+    mode: globalThis.__nanoUserscriptMode,
+    origin: location.origin,
+    host: location.hostname,
+    threadId: null,
+    signedIn: false,
+    rows: [],
+    latest: null,
+    streamEvents: 0,
+    streamUp: null,
+    fetches: [],
+    mutatingCalls: [],
+    done: false,
+    error: null,
+  };
+
+  const ZERO = { input: 0, output: 0, cacheRead: 0, cacheCreate: 0 };
+  let timer = null;
+  let pathInterval = null;
+  let es = null;
+  let busy = false;
+  let refreshQueued = false;
+  let stopped = false;
+  let generation = 0;
+  let threadId = null;
+  let state = null;
+
+  function allowedOrigin() {
+    return Boolean(ALLOWED_HOSTS[location.hostname.toLowerCase()]);
+  }
+
+  function threadIdFromPath(pathname) {
+    const match = pathname.match(/\/thread\/([^/?#]+)/);
+    return match ? match[1] : null;
+  }
+
+  function parseEpoch(value) {
+    if (!value) return 0;
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  function classify(status, thread) {
+    const enqueuedAt = parseEpoch(status.lastEnqueuedAt);
+    const completeAt = parseEpoch(status.turnCompleteAt);
+    const queued = Array.isArray(status.pendingQueue) ? status.pendingQueue.length : 0;
+    const source = status.runningTurnSource || null;
+    if (thread && thread.lastMessageIsError) {
+      return { k: 'error', label: 'stopped on error', queued, since: completeAt, source };
+    }
+    if (enqueuedAt > completeAt) {
+      return {
+        k: 'running',
+        label: source ? 'running (' + source + ')' : 'running',
+        queued,
+        since: enqueuedAt,
+        source,
+      };
+    }
+    if (queued) return { k: 'queued', label: 'queued x' + queued, queued, since: completeAt, source };
+    if (!enqueuedAt && !completeAt) return { k: 'new', label: 'no runs yet', queued: 0, since: 0, source };
+    if (status.lastRunMessageRole === 'assistant') {
+      return { k: 'waiting', label: 'waiting for you', queued: 0, since: completeAt, source };
+    }
+    return { k: 'idle', label: 'idle', queued: 0, since: completeAt, source };
+  }
+
+  function normalizeCapture(capture) {
+    if (!capture) return null;
+    return {
+      input: capture.input_tokens || 0,
+      output: capture.output_tokens || 0,
+      cacheRead: capture.cache_read_tokens || 0,
+      cacheCreate: capture.cache_create_tokens || 0,
+    };
+  }
+
+  function captureKey(split) {
+    return split ? split.input + '/' + split.output + '/' + split.cacheRead + '/' + split.cacheCreate : null;
+  }
+
+  function readBreakdown(breakdown) {
+    const items = {};
+    const byok = {};
+    (breakdown && breakdown.items ? breakdown.items : []).forEach(item => {
+      items[item.name] = { qty: item.quantity || 0, cost: item.costUsd || 0 };
+    });
+    (breakdown && breakdown.byokTokenUsage ? breakdown.byokTokenUsage : []).forEach(model => {
+      byok[model.model] = {
+        input: model.inputTokens || 0,
+        output: model.outputTokens || 0,
+        cacheRead: model.cacheReadTokens || 0,
+        cacheCreate: model.cacheCreateTokens || 0,
+      };
+    });
+    return { items, byok };
+  }
+
+  function meteredDelta(start, end) {
+    const delta = {};
+    if (!start || !end) return delta;
+    Object.keys(end).forEach(name => {
+      const change = end[name].qty - (start[name] ? start[name].qty : 0);
+      if (change) delta[name] = change;
+    });
+    return delta;
+  }
+
+  function byokDelta(start, end) {
+    const delta = {};
+    if (!start || !end) return delta;
+    Object.keys(end).forEach(model => {
+      const previous = start[model] || ZERO;
+      const current = end[model];
+      const change = {
+        input: current.input - previous.input,
+        output: current.output - previous.output,
+        cacheRead: current.cacheRead - previous.cacheRead,
+        cacheCreate: current.cacheCreate - previous.cacheCreate,
+      };
+      if (change.input || change.output || change.cacheRead || change.cacheCreate) delta[model] = change;
+    });
+    return delta;
+  }
+
+  function sumCaptures(list) {
+    return list.reduce(
+      (acc, cap) => {
+        acc.input += cap.input;
+        acc.output += cap.output;
+        acc.cacheRead += cap.cacheRead;
+        acc.cacheCreate += cap.cacheCreate;
+        acc.peak = Math.max(acc.peak, cap.input + cap.cacheRead);
+        return acc;
+      },
+      { input: 0, output: 0, cacheRead: 0, cacheCreate: 0, peak: 0 },
+    );
+  }
+
+  function emptyState(id) {
+    return {
+      threadId: id,
+      turns: [],
+      captures: [],
+      open: null,
+      latest: null,
+      streamEvents: 0,
+      streamUp: null,
+      err: null,
+    };
+  }
+
+  function recordCapture(split, at, source) {
+    if (!split) return;
+    const key = captureKey(split);
+    if (!key || key === '0/0/0/0') return;
+    if (state.open && state.open.lastCaptureKeyBySource[source] === key) return;
+    const rec = { t: at, input: split.input, output: split.output, cacheRead: split.cacheRead, cacheCreate: split.cacheCreate };
+    state.captures.push(rec);
+    if (state.captures.length > MAX_CAPTURES) state.captures.shift();
+    if (state.open) {
+      state.open.lastCaptureKeyBySource[source] = key;
+      state.open.caps.push(rec);
+    }
+  }
+
+  function captureKeysFromSnapshot(snap) {
+    const capture = captureKey(snap.capture);
+    const indicator = captureKey(snap.indicator);
+    const keys = {};
+    if (capture) keys.capture = capture;
+    if (indicator) keys.indicator = indicator;
+    return keys;
+  }
+
+  function nextTurnNumber() {
+    return state.turns.reduce((max, turn) => Math.max(max, turn.n || 0), 0) + 1;
+  }
+
+  function closeTurn(snap) {
+    const open = state.open;
+    const metered = meteredDelta(open.start.items, snap.items);
+    let burn = 0;
+    Object.keys(metered).forEach(name => {
+      if (/Tokens$/.test(name)) burn += metered[name];
+    });
+    // Failed runs can retain the previous completion timestamp. Close at this
+    // observation instead of emitting a negative-duration row.
+    const endedAt = snap.completeAt >= open.startedAt ? snap.completeAt : snap.t;
+    const row = {
+      n: nextTurnNumber(),
+      threadId: state.threadId,
+      startedAt: open.startedAt,
+      endedAt,
+      ms: endedAt - open.startedAt,
+      seconds: Math.round((endedAt - open.startedAt) / 1000),
+      model: snap.model,
+      source: open.source,
+      metered,
+      burn,
+      byok: byokDelta(open.start.byok, snap.byok),
+      calls: open.caps.length,
+      sampled: sumCaptures(open.caps),
+      // /usage is authoritative. SSE asks for a refresh; it is never accounting data.
+      costDelta: Math.max(0, (snap.cost || 0) - (open.start.cost || 0)),
+      phaseAtClose: snap.phase.k,
+    };
+    state.turns.unshift(row);
+    if (state.turns.length > MAX_TURNS) state.turns.length = MAX_TURNS;
+    state.open = null;
+    return row;
+  }
+
+  function completedOffscreenCycle(snap) {
+    const prev = state.latest;
+    return Boolean(
+      !snap.running &&
+        !state.open &&
+        prev &&
+        snap.enqueuedAt > prev.enqueuedAt &&
+        snap.completeAt >= snap.enqueuedAt,
+    );
+  }
+
+  function applySnapshot(snap) {
+    state.err = null;
+    result.error = null;
+    if (snap.running && !state.open) {
+      const baseline = state.latest && !state.latest.running ? state.latest : snap;
+      state.open = {
+        start: baseline,
+        startedAt: snap.enqueuedAt || snap.t,
+        caps: [],
+        lastCaptureKeyBySource: baseline === snap ? {} : captureKeysFromSnapshot(baseline),
+        source: snap.phase.source,
+      };
+    } else if (completedOffscreenCycle(snap)) {
+      // Status exposes the latest enqueue/complete pair even if polling missed
+      // the running interval. Emit that concrete cycle rather than no telemetry.
+      state.open = {
+        start: state.latest,
+        startedAt: snap.enqueuedAt,
+        caps: [],
+        lastCaptureKeyBySource: captureKeysFromSnapshot(state.latest),
+        source: snap.phase.source,
+      };
+    }
+    recordCapture(snap.capture, snap.t, 'capture');
+    recordCapture(snap.indicator, snap.t, 'indicator');
+    if (!snap.running && state.open) closeTurn(snap);
+    state.latest = snap;
+  }
+
+  async function withTimeout(promise, label) {
+    let timer = null;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(label + ' timed out after ' + FETCH_TIMEOUT_MS + 'ms')), FETCH_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  function fetchWithTimeout(path, init) {
+    return withTimeout(fetch(path, init), path);
+  }
+
+  async function getJSON(path) {
+    const url = location.origin + path;
+    result.fetches.push({ url, method: 'GET' });
+    if (result.fetches.length > MAX_FETCHES) {
+      result.fetches.splice(0, result.fetches.length - MAX_FETCHES);
+    }
+    const response = await fetchWithTimeout(path, {
+      method: 'GET',
+      credentials: 'same-origin',
+      headers: { accept: 'application/json' },
+    });
+    if (!response.ok) throw new Error(path + ' ' + response.status);
+    return withTimeout(response.json(), path + ' body');
+  }
+
+  function requestRefresh() {
+    if (stopped || !threadId || !state) return;
+    if (busy) {
+      refreshQueued = true;
+      return;
+    }
+    void refresh();
+  }
+
+  async function refresh() {
+    if (stopped || !threadId || !state) return;
+    if (busy) return;
+    const gen = generation;
+    const id = threadId;
+    const capturedState = state;
+    busy = true;
+    try {
+      const [status, thread, usage, breakdown] = await Promise.all([
+        getJSON('/api/threads/' + id + '/status'),
+        getJSON('/api/threads/' + id),
+        getJSON('/api/threads/' + id + '/usage'),
+        getJSON('/api/threads/' + id + '/usage-breakdown'),
+      ]);
+      if (stopped || gen !== generation || threadId !== id || state !== capturedState) return;
+      result.signedIn = true;
+      const phase = classify(status, thread);
+      const totals = (usage && usage.totals) || {};
+      const full = readBreakdown(breakdown);
+      applySnapshot({
+        t: Date.now(),
+        model: thread.modelId || null,
+        messages: thread.messageCount || 0,
+        phase,
+        running: phase.k === 'running',
+        enqueuedAt: parseEpoch(status.lastEnqueuedAt),
+        completeAt: parseEpoch(status.turnCompleteAt),
+        capture: normalizeCapture(usage.lastCapture),
+        indicator: normalizeCapture(thread.lastContextIndicator),
+        cost: totals.total_cost_usd || 0,
+        items: full.items,
+        byok: full.byok,
+      });
+      publish();
+    } catch (error) {
+      if (stopped || gen !== generation || threadId !== id || state !== capturedState) return;
+      const message = String(error && error.message ? error.message : error);
+      if (state) state.err = message;
+      result.error = message;
+      publish();
+    } finally {
+      if (gen === generation) {
+        busy = false;
+        if (refreshQueued) {
+          refreshQueued = false;
+          queueMicrotask(requestRefresh);
+        } else {
+          schedule();
+        }
+      }
+    }
+  }
+
+  function handleSseData(data) {
+    let parsed;
+    try {
+      parsed = JSON.parse(data);
+    } catch (error) {
+      return 'ignore';
+    }
+    if (parsed.type === 'cost-updated') {
+      state.streamEvents += 1;
+      return 'refresh';
+    }
+    return 'ignore';
+  }
+
+  function closeStream() {
+    if (es) {
+      try {
+        es.close();
+      } catch (error) {
+        // already closed
+      }
+      es = null;
+    }
+  }
+
+  function openStream() {
+    closeStream();
+    if (!threadId || stopped) return;
+    const id = threadId;
+    const gen = generation;
+    try {
+      es = new EventSource('/api/events/stream?threadId=' + id);
+      es.onopen = () => {
+        if (stopped || gen !== generation || threadId !== id || !state) return;
+        state.streamUp = true;
+        result.streamUp = true;
+        publish();
+      };
+      es.onerror = () => {
+        if (stopped || gen !== generation || threadId !== id || !state) return;
+        state.streamUp = false;
+        result.streamUp = false;
+        publish();
+      };
+      es.onmessage = event => {
+        if (stopped || gen !== generation || threadId !== id || !state) return;
+        if (handleSseData(event.data) === 'refresh') requestRefresh();
+      };
+    } catch (error) {
+      if (state) state.streamUp = false;
+      result.streamUp = false;
+    }
+  }
+
+  function schedule() {
+    if (stopped) return;
+    if (timer) clearTimeout(timer);
+    const running = state && state.latest && state.latest.running;
+    timer = setTimeout(() => {
+      requestRefresh();
+    }, running ? RUN_MS : IDLE_MS);
+  }
+
+  function paint(status) {
+    if (!document.body) return;
+    let banner = document.querySelector('#nano-hyperagent-observe');
+    if (!banner) {
+      banner = document.createElement('aside');
+      banner.id = 'nano-hyperagent-observe';
+      banner.style.cssText =
+        'padding:10px;margin:10px;border:2px solid currentColor;border-radius:8px;max-width:42rem;white-space:pre-wrap;font:13px/1.4 sans-serif';
+      document.body.prepend(banner);
+    }
+    banner.dataset.scriptId = 'hyperagent-observe';
+    banner.dataset.threadId = threadId || '';
+    banner.dataset.rows = String((state && state.turns ? state.turns.length : 0) || result.rows.length);
+    banner.dataset.phase = state && state.latest ? state.latest.phase.k : '';
+    banner.textContent = status;
+  }
+
+  function publish() {
+    result.threadId = threadId;
+    result.error = state ? state.err : result.error;
+    result.rows = state ? state.turns.slice().reverse() : [];
+    result.latest = state ? state.latest : null;
+    result.streamEvents = state ? state.streamEvents : 0;
+    result.streamUp = state ? state.streamUp : null;
+    result.mutatingCalls = result.fetches.filter(call => call.method !== 'GET' && call.method !== 'HEAD');
+    globalThis.__nanoHyperagentObserve = result;
+    const phase = result.latest && result.latest.phase ? result.latest.phase.label : 'idle';
+    const err = result.error ? '\nerror: ' + result.error : '';
+    paint(
+      'Nano Reborn Hyperagent observe (GET + SSE, no writes)\n' +
+        'thread ' +
+        (threadId || '(none)') +
+        ' · ' +
+        phase +
+        ' · rows ' +
+        result.rows.length +
+        ' · sse ' +
+        (result.streamUp ? 'up' : 'down') +
+        ' · events ' +
+        result.streamEvents +
+        err,
+    );
+  }
+
+  function resetPublishedThread() {
+    threadId = null;
+    state = null;
+    result.threadId = null;
+    result.signedIn = false;
+    result.rows = [];
+    result.latest = null;
+    result.streamEvents = 0;
+    result.streamUp = null;
+    globalThis.__nanoHyperagentObserve = result;
+  }
+
+  function onBeforeUnload() {
+    closeStream();
+  }
+
+  function dispose() {
+    stopped = true;
+    generation += 1;
+    busy = false;
+    refreshQueued = false;
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    if (pathInterval) {
+      clearInterval(pathInterval);
+      pathInterval = null;
+    }
+    closeStream();
+    window.removeEventListener('beforeunload', onBeforeUnload);
+    if (globalThis[STOP_KEY] === dispose) {
+      try {
+        delete globalThis[STOP_KEY];
+      } catch (error) {
+        globalThis[STOP_KEY] = undefined;
+      }
+    }
+  }
+
+  function boot() {
+    if (stopped) return;
+    if (!allowedOrigin()) {
+      result.error = 'hyperagent-observe is only allowed on hyperagent.com or www.hyperagent.com (host: ' + location.hostname + ')';
+      result.done = true;
+      resetPublishedThread();
+      paint('Nano Reborn Hyperagent observe: refused off hyperagent.com or www.hyperagent.com');
+      return;
+    }
+
+    const id = threadIdFromPath(location.pathname);
+    if (!id) {
+      generation += 1;
+      busy = false;
+      refreshQueued = false;
+      result.error = 'No Hyperagent thread id in the URL. Open /thread/{id}.';
+      result.done = true;
+      resetPublishedThread();
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      closeStream();
+      paint('Nano Reborn Hyperagent observe: no /thread/{id} in this URL');
+      return;
+    }
+    if (id === threadId && state) return;
+
+    generation += 1;
+    busy = false;
+    refreshQueued = false;
+    threadId = id;
+    state = emptyState(id);
+    result.error = null;
+    result.done = false;
+    // Clear a previous page-global result synchronously. The action handoff must
+    // never report rows from a thread observed before this injection/navigation.
+    result.threadId = id;
+    result.signedIn = false;
+    result.rows = [];
+    result.latest = null;
+    result.streamEvents = 0;
+    result.streamUp = null;
+    result.fetches = [];
+    result.mutatingCalls = [];
+    globalThis.__nanoHyperagentObserve = result;
+    paint('Nano Reborn Hyperagent observe: fetching /status /usage /usage-breakdown…');
+    openStream();
+    requestRefresh();
+  }
+
+  let lastPath = location.pathname;
+  pathInterval = setInterval(() => {
+    if (stopped) return;
+    if (location.pathname !== lastPath) {
+      lastPath = location.pathname;
+      boot();
+    }
+  }, 1200);
+  window.addEventListener('beforeunload', onBeforeUnload);
+  globalThis[STOP_KEY] = dispose;
+  boot();
+})();

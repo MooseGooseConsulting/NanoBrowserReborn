@@ -1,5 +1,9 @@
 import { z } from 'zod';
-import { CHATGPT_ORGANIZE_SCRIPT_ID, FIXTURE_SCRIPT_ID } from '../../userscripts/catalog';
+import {
+  CHATGPT_ORGANIZE_SCRIPT_ID,
+  FIXTURE_SCRIPT_ID,
+  HYPERAGENT_OBSERVE_SCRIPT_ID,
+} from '../../userscripts/catalog';
 
 export interface ActionSchema {
   name: string;
@@ -227,11 +231,11 @@ export function isUserscriptOnlyAction(name: string): boolean {
 export const runUserscriptActionSchema: ActionSchema = {
   name: RUN_USERSCRIPT_ACTION,
   description:
-    'Run a reviewed userscript payload in the page MAIN world, scoped to the current tab origin. Packaged public/userscripts/*.user.js files are the reviewed seed. If a rewrite_userscript overlay exists for script_id, inject that stored source in MAIN (userScripts.execute code when available, otherwise executeScript func/args); leftover packaged registrations are cleared first. Otherwise inject the packaged seed. This is not registerContentScripts for rewrite — overlays never write packaged files. script_id is a reviewed-id enum: "fixture" (banner/counter inject proof) or "chatgpt-organize" (one-shot executeScript on chatgpt.com: list scrap chats and PATCH titles; signed-out or 401 is an error). A KEEP_CURRENT organize failure means rewrite_userscript with a repaired overlay then run_userscript once — not signed-out/401/origin-lock. Do not use click_element to organize ChatGPT chats.',
+    'Run a reviewed userscript payload in the page MAIN world, scoped to the current tab origin. Packaged public/userscripts/*.user.js files are the reviewed seed. If a rewrite_userscript overlay exists for script_id, inject that stored source in MAIN (userScripts.execute code when available, otherwise executeScript func/args); leftover packaged registrations are cleared first. Otherwise inject the packaged seed. This is not registerContentScripts for rewrite — overlays never write packaged files. script_id is a reviewed-id enum: "fixture" (banner/counter inject proof), "chatgpt-organize" (one-shot executeScript on chatgpt.com: list scrap chats and PATCH titles; signed-out or 401 is an error), or "hyperagent-observe" (same-origin GET + SSE telemetry on hyperagent.com or www.hyperagent.com; one row per run, no writes). A KEEP_CURRENT organize failure means rewrite_userscript with a repaired overlay then run_userscript once — not signed-out/401/origin-lock. Do not use click_element to organize ChatGPT chats. Do not PATCH/POST to Hyperagent or use MCP OAuth.',
   schema: z.object({
     intent: z.string().default('').describe('purpose of this action'),
     script_id: z
-      .enum([FIXTURE_SCRIPT_ID, CHATGPT_ORGANIZE_SCRIPT_ID])
+      .enum([FIXTURE_SCRIPT_ID, CHATGPT_ORGANIZE_SCRIPT_ID, HYPERAGENT_OBSERVE_SCRIPT_ID])
       .default(FIXTURE_SCRIPT_ID)
       .describe('reviewed payload id'),
   }),

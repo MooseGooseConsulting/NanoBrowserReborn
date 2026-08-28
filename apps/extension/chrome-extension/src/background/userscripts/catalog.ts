@@ -1,7 +1,12 @@
 export const FIXTURE_SCRIPT_ID = 'fixture';
 export const CHATGPT_ORGANIZE_SCRIPT_ID = 'chatgpt-organize';
+export const HYPERAGENT_OBSERVE_SCRIPT_ID = 'hyperagent-observe';
 
-export const REVIEWED_USERSCRIPT_IDS = [FIXTURE_SCRIPT_ID, CHATGPT_ORGANIZE_SCRIPT_ID] as const;
+export const REVIEWED_USERSCRIPT_IDS = [
+  FIXTURE_SCRIPT_ID,
+  CHATGPT_ORGANIZE_SCRIPT_ID,
+  HYPERAGENT_OBSERVE_SCRIPT_ID,
+] as const;
 
 export type ReviewedUserscriptId = (typeof REVIEWED_USERSCRIPT_IDS)[number];
 
@@ -10,20 +15,24 @@ export const USER_SCRIPTS_MODE_FILE = 'userscripts/mode-user-scripts.js';
 export const COMPAT_FILE = 'userscripts/compat.js';
 export const FIXTURE_FILE = 'userscripts/fixture.user.js';
 export const CHATGPT_ORGANIZE_FILE = 'userscripts/chatgpt-organize.user.js';
+export const HYPERAGENT_OBSERVE_FILE = 'userscripts/hyperagent-observe.user.js';
 
 const PAYLOAD_FILE_BY_ID: Record<ReviewedUserscriptId, string> = {
   [FIXTURE_SCRIPT_ID]: FIXTURE_FILE,
   [CHATGPT_ORGANIZE_SCRIPT_ID]: CHATGPT_ORGANIZE_FILE,
+  [HYPERAGENT_OBSERVE_SCRIPT_ID]: HYPERAGENT_OBSERVE_FILE,
 };
 
 /**
  * Hostnames the payload may run on. Empty means any injectable http(s) tab.
  * chatgpt-organize is origin-locked; the organize body is public/userscripts/chatgpt-organize.user.js.
  * Only chatgpt.com serves /backend-api. chat.openai.com 308s there; www hosts 301.
+ * hyperagent-observe is origin-locked to Hyperagent.
  */
 export const REVIEWED_USERSCRIPT_HOSTS: Record<ReviewedUserscriptId, readonly string[]> = {
   [FIXTURE_SCRIPT_ID]: [],
   [CHATGPT_ORGANIZE_SCRIPT_ID]: ['chatgpt.com'],
+  [HYPERAGENT_OBSERVE_SCRIPT_ID]: ['hyperagent.com', 'www.hyperagent.com'],
 };
 
 /**
@@ -33,7 +42,10 @@ export const REVIEWED_USERSCRIPT_HOSTS: Record<ReviewedUserscriptId, readonly st
 export const PAYLOAD_IDENTITY_HOOKS: Record<ReviewedUserscriptId, readonly string[]> = {
   [FIXTURE_SCRIPT_ID]: ['__nanoUserscriptPoc'],
   [CHATGPT_ORGANIZE_SCRIPT_ID]: ['__nanoChatGptOrganize', '__nanoOrganizeRun'],
+  [HYPERAGENT_OBSERVE_SCRIPT_ID]: ['__nanoHyperagentObserve'],
 };
+
+export const HYPERAGENT_OBSERVE_HOSTS = REVIEWED_USERSCRIPT_HOSTS[HYPERAGENT_OBSERVE_SCRIPT_ID];
 
 export type UserscriptRegistrationMode = 'chrome.scripting.registerContentScripts' | 'chrome.userScripts';
 
@@ -71,4 +83,16 @@ export function allContentScriptIds(): string[] {
 
 export function allUserScriptIds(): string[] {
   return REVIEWED_USERSCRIPT_IDS.map(userScriptIdFor);
+}
+
+export function isHyperagentObserveOrigin(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return false;
+    }
+    return HYPERAGENT_OBSERVE_HOSTS.includes(parsed.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
 }
