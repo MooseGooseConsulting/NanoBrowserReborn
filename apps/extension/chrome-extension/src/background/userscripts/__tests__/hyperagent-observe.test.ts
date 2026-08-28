@@ -170,7 +170,7 @@ describe('hyperagent observe reducer', () => {
     expect(closed?.calls).toBeGreaterThan(0);
   });
 
-  it('does not fabricate an aggregate row for a run that was never observed running', () => {
+  it('restores one latest status-evidenced cycle that completed between observations', () => {
     const state = emptyObserveState(THREAD_ID);
     const prior = applyObserveSnapshot(
       state,
@@ -209,8 +209,10 @@ describe('hyperagent observe reducer', () => {
         Date.parse('2026-08-27T12:30:24.114Z'),
       ),
     );
-    expect(missed).toBeNull();
-    expect(state.turns).toHaveLength(0);
+    expect(missed).not.toBeNull();
+    expect(state.turns).toHaveLength(1);
+    expect(missed?.startedAt).toBe(Date.parse('2026-08-27T12:05:56.063Z'));
+    expect(missed?.endedAt).toBe(Date.parse('2026-08-27T12:30:24.114Z'));
 
     const again = applyObserveSnapshot(
       state,
@@ -227,7 +229,7 @@ describe('hyperagent observe reducer', () => {
       ),
     );
     expect(again).toBeNull();
-    expect(state.turns).toHaveLength(0);
+    expect(state.turns).toHaveLength(1);
   });
 
   it('does not invent a historical row from the first already-complete snapshot', () => {
@@ -268,7 +270,7 @@ describe('hyperagent observe reducer', () => {
     expect(closed?.endedAt).toBe(300);
   });
 
-  it('records equal captures on a later run and does not globally suppress them', () => {
+  it('does not attribute an unchanged prior-turn capture to the next run', () => {
     const state = emptyObserveState(THREAD_ID);
     const capture = {
       input_tokens: 657,
@@ -320,7 +322,7 @@ describe('hyperagent observe reducer', () => {
     expect(second).not.toBeNull();
     expect(state.turns).toHaveLength(2);
     expect(second?.n).toBe(2);
-    expect(second?.calls).toBeGreaterThan(0);
+    expect(second?.calls).toBe(0);
   });
 
   it('keeps nonconsecutive equal token captures within the same observed run', () => {
@@ -549,6 +551,23 @@ describe('hyperagent observe fetch + SSE pass (mocked)', () => {
     });
 
     expect(result.error).toMatch(/timed out/i);
+    expect(result.mutatingCalls).toEqual([]);
+  });
+
+  it('recovers from a hung response body by reporting a bounded observation failure', async () => {
+    const result = await runHyperagentObservePass({
+      origin: 'https://hyperagent.com',
+      pathname: `/thread/${THREAD_ID}`,
+      fetchTimeoutMs: 1,
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        json: async () => new Promise<never>(() => {}),
+      }),
+    });
+
+    expect(result.error).toMatch(/body.*timed out/i);
     expect(result.mutatingCalls).toEqual([]);
   });
 

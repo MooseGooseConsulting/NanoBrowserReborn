@@ -323,6 +323,15 @@ function recordCapture(
   }
 }
 
+function captureKeysFromSnapshot(snap: ObserveSnapshot): Partial<Record<'capture' | 'indicator', string>> {
+  const capture = captureKey(snap.capture);
+  const indicator = captureKey(snap.indicator);
+  return {
+    ...(capture ? { capture } : {}),
+    ...(indicator ? { indicator } : {}),
+  };
+}
+
 function closeTurn(state: ObserveReducerState, snap: ObserveSnapshot): ObserveRow {
   const open = state.open as OpenRun;
   const metered = meteredDelta(open.start.items, snap.items);
@@ -362,6 +371,17 @@ function closeTurn(state: ObserveReducerState, snap: ObserveSnapshot): ObserveRo
   return row;
 }
 
+function completedOffscreenCycle(state: ObserveReducerState, snap: ObserveSnapshot): boolean {
+  const prev = state.latest;
+  return Boolean(
+    !snap.running &&
+      !state.open &&
+      prev &&
+      snap.enqueuedAt > prev.enqueuedAt &&
+      snap.completeAt >= snap.enqueuedAt,
+  );
+}
+
 export function applyObserveSnapshot(state: ObserveReducerState, snap: ObserveSnapshot): ObserveRow | null {
   state.err = null;
 
@@ -371,7 +391,17 @@ export function applyObserveSnapshot(state: ObserveReducerState, snap: ObserveSn
       start: baseline,
       startedAt: snap.enqueuedAt || snap.t,
       caps: [],
-      lastCaptureKeyBySource: {},
+      lastCaptureKeyBySource: baseline === snap ? {} : captureKeysFromSnapshot(baseline),
+      source: snap.phase.source,
+    };
+  } else if (completedOffscreenCycle(state, snap) && state.latest) {
+    // Status exposes the latest enqueue/complete pair even if polling missed
+    // the running interval. Emit that concrete cycle rather than no telemetry.
+    state.open = {
+      start: state.latest,
+      startedAt: snap.enqueuedAt,
+      caps: [],
+      lastCaptureKeyBySource: captureKeysFromSnapshot(state.latest),
       source: snap.phase.source,
     };
   }
@@ -542,7 +572,7 @@ export async function runHyperagentObservePass(options: {
       result.mutatingCalls.push({ url, method: used });
       throw new Error(`hyperagent-observe is GET-only; refused ${used} ${path}`);
     }
-    return readJson(response, path);
+    return withTimeout(readJson(response, path), `GET ${path} body`);
   };
 
   const asErrorMessage = (error: unknown): string =>

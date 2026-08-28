@@ -192,6 +192,15 @@
     }
   }
 
+  function captureKeysFromSnapshot(snap) {
+    const capture = captureKey(snap.capture);
+    const indicator = captureKey(snap.indicator);
+    const keys = {};
+    if (capture) keys.capture = capture;
+    if (indicator) keys.indicator = indicator;
+    return keys;
+  }
+
   function nextTurnNumber() {
     return state.turns.reduce((max, turn) => Math.max(max, turn.n || 0), 0) + 1;
   }
@@ -230,6 +239,17 @@
     return row;
   }
 
+  function completedOffscreenCycle(snap) {
+    const prev = state.latest;
+    return Boolean(
+      !snap.running &&
+        !state.open &&
+        prev &&
+        snap.enqueuedAt > prev.enqueuedAt &&
+        snap.completeAt >= snap.enqueuedAt,
+    );
+  }
+
   function applySnapshot(snap) {
     state.err = null;
     result.error = null;
@@ -239,7 +259,17 @@
         start: baseline,
         startedAt: snap.enqueuedAt || snap.t,
         caps: [],
-        lastCaptureKeyBySource: {},
+        lastCaptureKeyBySource: baseline === snap ? {} : captureKeysFromSnapshot(baseline),
+        source: snap.phase.source,
+      };
+    } else if (completedOffscreenCycle(snap)) {
+      // Status exposes the latest enqueue/complete pair even if polling missed
+      // the running interval. Emit that concrete cycle rather than no telemetry.
+      state.open = {
+        start: state.latest,
+        startedAt: snap.enqueuedAt,
+        caps: [],
+        lastCaptureKeyBySource: captureKeysFromSnapshot(state.latest),
         source: snap.phase.source,
       };
     }
@@ -249,18 +279,22 @@
     state.latest = snap;
   }
 
-  async function fetchWithTimeout(path, init) {
+  async function withTimeout(promise, label) {
     let timer = null;
     try {
       return await Promise.race([
-        fetch(path, init),
+        promise,
         new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new Error(path + ' timed out after ' + FETCH_TIMEOUT_MS + 'ms')), FETCH_TIMEOUT_MS);
+          timer = setTimeout(() => reject(new Error(label + ' timed out after ' + FETCH_TIMEOUT_MS + 'ms')), FETCH_TIMEOUT_MS);
         }),
       ]);
     } finally {
       if (timer) clearTimeout(timer);
     }
+  }
+
+  function fetchWithTimeout(path, init) {
+    return withTimeout(fetch(path, init), path);
   }
 
   async function getJSON(path) {
@@ -275,7 +309,7 @@
       headers: { accept: 'application/json' },
     });
     if (!response.ok) throw new Error(path + ' ' + response.status);
-    return response.json();
+    return withTimeout(response.json(), path + ' body');
   }
 
   function requestRefresh() {
@@ -493,7 +527,7 @@
       result.error = 'hyperagent-observe is only allowed on hyperagent.com or www.hyperagent.com (host: ' + location.hostname + ')';
       result.done = true;
       resetPublishedThread();
-      paint('Nano Reborn Hyperagent observe: refused off hyperagent.com');
+      paint('Nano Reborn Hyperagent observe: refused off hyperagent.com or www.hyperagent.com');
       return;
     }
 

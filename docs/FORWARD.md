@@ -22,7 +22,7 @@ Set-of-marks is **optional**. Do not rebuild `buildDomTree` / `highlightIndex`. 
 
 ## This PR (item 2) — Hyperagent observe
 
-`hyperagent-observe` is origin-gated to `hyperagent.com` and `www.hyperagent.com`. It reads `/api/threads/{id}/status`, `/usage`, `/usage-breakdown`, and `/api/threads/{id}` with same-origin GET and treats SSE `/api/events/stream` as a refresh signal. It performs no DOM scraping, `PATCH`, `POST`, or MCP OAuth. The current status surface has no run history, so cycles entirely between observations are reported as an explicit coverage gap rather than fabricated as a single row.
+`hyperagent-observe` is origin-gated to `hyperagent.com` and `www.hyperagent.com`. It reads `/api/threads/{id}/status`, `/usage`, `/usage-breakdown`, and `/api/threads/{id}` with same-origin GET and treats SSE `/api/events/stream` as a refresh signal. It performs no DOM scraping, `PATCH`, `POST`, or MCP OAuth. A changed latest status enqueue/complete pair supports one recovered offscreen row; multiple cycles entirely between observations remain an explicit coverage gap because the status surface has no history.
 
 This PR must return observed rows through `run_userscript`; it must not merely inject a page-local observer. Backend ingestion, MCP dispatch, and REST configuration are follow-on work.
 
