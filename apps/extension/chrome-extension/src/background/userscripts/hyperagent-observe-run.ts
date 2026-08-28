@@ -28,6 +28,8 @@ type InjectionResult = { result?: HyperagentObservePageResult };
 export function waitForHyperagentObserveHandoffInPage(timeoutMs: number): Promise<HyperagentObservePageResult | null> {
   const deadline = Date.now() + timeoutMs;
   const pollMs = 50;
+  const expectedThreadId = location.pathname.match(/\/thread\/([^/?#]+)/)?.[1] || null;
+  const expectedOrigin = location.origin;
 
   return new Promise(resolve => {
     const inspect = () => {
@@ -41,9 +43,20 @@ export function waitForHyperagentObserveHandoffInPage(timeoutMs: number): Promis
         return;
       }
 
+      // Reinjection and SPA navigation can briefly leave a prior observer's
+      // global behind. Only accept the state published for this exact page.
+      if (result.origin !== expectedOrigin || result.threadId !== expectedThreadId) {
+        if (Date.now() >= deadline) {
+          resolve(null);
+          return;
+        }
+        setTimeout(inspect, pollMs);
+        return;
+      }
+
       const rows = Array.isArray(result.rows) ? result.rows : [];
       const running = Boolean(result.latest?.running);
-      if (result.error || rows.length > 0 || !result.latest || !running || Date.now() >= deadline) {
+      if (result.error || rows.length > 0 || (result.latest && !running) || Date.now() >= deadline) {
         resolve({
           loaded: result.loaded === true,
           scriptId: 'hyperagent-observe',

@@ -14,6 +14,7 @@
   const MAX_TURNS = 300;
   const MAX_CAPTURES = 5000;
   const MAX_FETCHES = 40;
+  const FETCH_TIMEOUT_MS = 15000;
 
   if (typeof globalThis[STOP_KEY] === 'function') {
     try {
@@ -72,6 +73,9 @@
     const completeAt = parseEpoch(status.turnCompleteAt);
     const queued = Array.isArray(status.pendingQueue) ? status.pendingQueue.length : 0;
     const source = status.runningTurnSource || null;
+    if (thread && thread.lastMessageIsError) {
+      return { k: 'error', label: 'stopped on error', queued, since: completeAt, source };
+    }
     if (enqueuedAt > completeAt) {
       return {
         k: 'running',
@@ -80,9 +84,6 @@
         since: enqueuedAt,
         source,
       };
-    }
-    if (thread && thread.lastMessageIsError) {
-      return { k: 'error', label: 'stopped on error', queued: 0, since: completeAt, source };
     }
     if (queued) return { k: 'queued', label: 'queued x' + queued, queued, since: completeAt, source };
     if (!enqueuedAt && !completeAt) return { k: 'new', label: 'no runs yet', queued: 0, since: 0, source };
@@ -169,7 +170,6 @@
       threadId: id,
       turns: [],
       captures: [],
-      seen: {},
       open: null,
       latest: null,
       streamEvents: 0,
@@ -178,15 +178,18 @@
     };
   }
 
-  function recordCapture(split, at) {
+  function recordCapture(split, at, source) {
     if (!split) return;
     const key = captureKey(split);
-    if (!key || key === '0/0/0/0' || state.seen[key]) return;
-    state.seen[key] = 1;
+    if (!key || key === '0/0/0/0') return;
+    if (state.open && state.open.lastCaptureKeyBySource[source] === key) return;
     const rec = { t: at, input: split.input, output: split.output, cacheRead: split.cacheRead, cacheCreate: split.cacheCreate };
     state.captures.push(rec);
     if (state.captures.length > MAX_CAPTURES) state.captures.shift();
-    if (state.open) state.open.caps.push(rec);
+    if (state.open) {
+      state.open.lastCaptureKeyBySource[source] = key;
+      state.open.caps.push(rec);
+    }
   }
 
   function nextTurnNumber() {
@@ -200,7 +203,9 @@
     Object.keys(metered).forEach(name => {
       if (/Tokens$/.test(name)) burn += metered[name];
     });
-    const endedAt = snap.completeAt || snap.t;
+    // Failed runs can retain the previous completion timestamp. Close at this
+    // observation instead of emitting a negative-duration row.
+    const endedAt = snap.completeAt >= open.startedAt ? snap.completeAt : snap.t;
     const row = {
       n: nextTurnNumber(),
       threadId: state.threadId,
@@ -225,42 +230,37 @@
     return row;
   }
 
-  function completedOffscreenCycle(snap) {
-    const prev = state.latest;
-    return Boolean(
-      !snap.running &&
-        !state.open &&
-        prev &&
-        snap.enqueuedAt > 0 &&
-        snap.enqueuedAt > prev.enqueuedAt &&
-        snap.completeAt >= snap.enqueuedAt,
-    );
-  }
-
   function applySnapshot(snap) {
     state.err = null;
     result.error = null;
     if (snap.running && !state.open) {
-      state.seen = {};
+      const baseline = state.latest && !state.latest.running ? state.latest : snap;
       state.open = {
-        start: snap,
+        start: baseline,
         startedAt: snap.enqueuedAt || snap.t,
         caps: [],
-        source: snap.phase.source,
-      };
-    } else if (completedOffscreenCycle(snap)) {
-      state.seen = {};
-      state.open = {
-        start: state.latest,
-        startedAt: snap.enqueuedAt,
-        caps: [],
+        lastCaptureKeyBySource: {},
         source: snap.phase.source,
       };
     }
-    recordCapture(snap.capture, snap.t);
-    recordCapture(snap.indicator, snap.t);
+    recordCapture(snap.capture, snap.t, 'capture');
+    recordCapture(snap.indicator, snap.t, 'indicator');
     if (!snap.running && state.open) closeTurn(snap);
     state.latest = snap;
+  }
+
+  async function fetchWithTimeout(path, init) {
+    let timer = null;
+    try {
+      return await Promise.race([
+        fetch(path, init),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(path + ' timed out after ' + FETCH_TIMEOUT_MS + 'ms')), FETCH_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   async function getJSON(path) {
@@ -269,7 +269,7 @@
     if (result.fetches.length > MAX_FETCHES) {
       result.fetches.splice(0, result.fetches.length - MAX_FETCHES);
     }
-    const response = await fetch(path, {
+    const response = await fetchWithTimeout(path, {
       method: 'GET',
       credentials: 'same-origin',
       headers: { accept: 'application/json' },
@@ -490,7 +490,7 @@
   function boot() {
     if (stopped) return;
     if (!allowedOrigin()) {
-      result.error = 'hyperagent-observe is only allowed on hyperagent.com (host: ' + location.hostname + ')';
+      result.error = 'hyperagent-observe is only allowed on hyperagent.com or www.hyperagent.com (host: ' + location.hostname + ')';
       result.done = true;
       resetPublishedThread();
       paint('Nano Reborn Hyperagent observe: refused off hyperagent.com');
@@ -522,6 +522,17 @@
     state = emptyState(id);
     result.error = null;
     result.done = false;
+    // Clear a previous page-global result synchronously. The action handoff must
+    // never report rows from a thread observed before this injection/navigation.
+    result.threadId = id;
+    result.signedIn = false;
+    result.rows = [];
+    result.latest = null;
+    result.streamEvents = 0;
+    result.streamUp = null;
+    result.fetches = [];
+    result.mutatingCalls = [];
+    globalThis.__nanoHyperagentObserve = result;
     paint('Nano Reborn Hyperagent observe: fetching /status /usage /usage-breakdown…');
     openStream();
     requestRefresh();

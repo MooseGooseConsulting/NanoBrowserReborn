@@ -11,7 +11,7 @@ Set-of-marks is **optional**. Do not rebuild `buildDomTree` / `highlightIndex`. 
 ## The only plan
 
 1. **On main** — runner/fixture, ChatGPT organize, the overlay keep-current loop, and four-state Leader/Follower handling are landed.
-2. **This PR** — Hyperagent OBSERVE (`hyperagent-observe`): same-origin GET + SSE, one telemetry row per run, no Hyperagent writes.
+2. **This PR** — Hyperagent OBSERVE (`hyperagent-observe`): same-origin GET + SSE, one telemetry row per observed enqueue-to-complete run, no Hyperagent writes.
 3. **Later** — Stagehand host after a real CDP 5-step; MCP dispatch/config REST behind contract tests; LangGraph; marks/SAM.
 
 ## On main (item 1)
@@ -22,7 +22,7 @@ Set-of-marks is **optional**. Do not rebuild `buildDomTree` / `highlightIndex`. 
 
 ## This PR (item 2) — Hyperagent observe
 
-`hyperagent-observe` is origin-gated to `hyperagent.com` and `www.hyperagent.com`. It reads `/api/threads/{id}/status`, `/usage`, `/usage-breakdown`, and `/api/threads/{id}` with same-origin GET and treats SSE `/api/events/stream` as a refresh signal. It performs no DOM scraping, `PATCH`, `POST`, or MCP OAuth.
+`hyperagent-observe` is origin-gated to `hyperagent.com` and `www.hyperagent.com`. It reads `/api/threads/{id}/status`, `/usage`, `/usage-breakdown`, and `/api/threads/{id}` with same-origin GET and treats SSE `/api/events/stream` as a refresh signal. It performs no DOM scraping, `PATCH`, `POST`, or MCP OAuth. The current status surface has no run history, so cycles entirely between observations are reported as an explicit coverage gap rather than fabricated as a single row.
 
 This PR must return observed rows through `run_userscript`; it must not merely inject a page-local observer. Backend ingestion, MCP dispatch, and REST configuration are follow-on work.
 

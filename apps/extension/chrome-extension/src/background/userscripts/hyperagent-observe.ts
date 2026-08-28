@@ -61,6 +61,7 @@ export interface OpenRun {
   start: ObserveSnapshot;
   startedAt: number;
   caps: Array<TokenSplit & { t: number }>;
+  lastCaptureKeyBySource: Partial<Record<'capture' | 'indicator', string>>;
   source: string | null;
 }
 
@@ -68,7 +69,6 @@ export interface ObserveReducerState {
   threadId: string;
   turns: ObserveRow[];
   captures: Array<TokenSplit & { t: number }>;
-  seen: Record<string, 1>;
   open: OpenRun | null;
   latest: ObserveSnapshot | null;
   streamEvents: number;
@@ -118,6 +118,7 @@ export interface UsageBreakdownPayload {
 const ZERO: TokenSplit = { input: 0, output: 0, cacheRead: 0, cacheCreate: 0 };
 export const MAX_OBSERVE_TURNS = 300;
 export const MAX_OBSERVE_CAPTURES = 5000;
+export const OBSERVE_FETCH_TIMEOUT_MS = 15_000;
 
 export function threadIdFromPath(pathname: string): string | null {
   const match = pathname.match(HYPERAGENT_THREAD_PATH);
@@ -138,6 +139,9 @@ export function classifyRunPhase(status: ThreadStatusPayload, thread?: ThreadPay
   const queued = Array.isArray(status.pendingQueue) ? status.pendingQueue.length : 0;
   const source = status.runningTurnSource || null;
 
+  if (thread && thread.lastMessageIsError) {
+    return { k: 'error', label: 'stopped on error', queued, since: completeAt, source };
+  }
   if (enqueuedAt > completeAt) {
     return {
       k: 'running',
@@ -146,9 +150,6 @@ export function classifyRunPhase(status: ThreadStatusPayload, thread?: ThreadPay
       since: enqueuedAt,
       source,
     };
-  }
-  if (thread && thread.lastMessageIsError) {
-    return { k: 'error', label: 'stopped on error', queued: 0, since: completeAt, source };
   }
   if (queued) {
     return { k: 'queued', label: `queued x${queued}`, queued, since: completeAt, source };
@@ -229,7 +230,6 @@ export function emptyObserveState(threadId: string): ObserveReducerState {
     threadId,
     turns: [],
     captures: [],
-    seen: {},
     open: null,
     latest: null,
     streamEvents: 0,
@@ -296,21 +296,29 @@ function sumCaptures(list: Array<TokenSplit>): TokenSplit & { peak: number } {
   );
 }
 
-function recordCapture(state: ObserveReducerState, split: TokenSplit | null, at: number): void {
+function recordCapture(
+  state: ObserveReducerState,
+  split: TokenSplit | null,
+  at: number,
+  source: 'capture' | 'indicator',
+): void {
   if (!split) {
     return;
   }
   const key = captureKey(split);
-  if (!key || key === '0/0/0/0' || state.seen[key]) {
+  if (!key || key === '0/0/0/0') {
     return;
   }
-  state.seen[key] = 1;
+  if (state.open?.lastCaptureKeyBySource[source] === key) {
+    return;
+  }
   const rec = { t: at, ...split };
   state.captures.push(rec);
   if (state.captures.length > MAX_OBSERVE_CAPTURES) {
     state.captures.splice(0, state.captures.length - MAX_OBSERVE_CAPTURES);
   }
   if (state.open) {
+    state.open.lastCaptureKeyBySource[source] = key;
     state.open.caps.push(rec);
   }
 }
@@ -324,7 +332,9 @@ function closeTurn(state: ObserveReducerState, snap: ObserveSnapshot): ObserveRo
       burn += qty;
     }
   }
-  const endedAt = snap.completeAt || snap.t;
+  // Failed runs can retain the previous completion timestamp. Close at this
+  // observation instead of emitting a negative-duration row.
+  const endedAt = snap.completeAt >= open.startedAt ? snap.completeAt : snap.t;
   const row: ObserveRow = {
     n: state.turns.reduce((max, turn) => Math.max(max, turn.n), 0) + 1,
     threadId: state.threadId,
@@ -352,41 +362,22 @@ function closeTurn(state: ObserveReducerState, snap: ObserveSnapshot): ObserveRo
   return row;
 }
 
-function completedOffscreenCycle(state: ObserveReducerState, snap: ObserveSnapshot): boolean {
-  const prev = state.latest;
-  return Boolean(
-    !snap.running &&
-      !state.open &&
-      prev &&
-      snap.enqueuedAt > 0 &&
-      snap.enqueuedAt > prev.enqueuedAt &&
-      snap.completeAt >= snap.enqueuedAt,
-  );
-}
-
 export function applyObserveSnapshot(state: ObserveReducerState, snap: ObserveSnapshot): ObserveRow | null {
   state.err = null;
 
   if (snap.running && !state.open) {
-    state.seen = {};
+    const baseline = state.latest && !state.latest.running ? state.latest : snap;
     state.open = {
-      start: snap,
+      start: baseline,
       startedAt: snap.enqueuedAt || snap.t,
       caps: [],
-      source: snap.phase.source,
-    };
-  } else if (completedOffscreenCycle(state, snap) && state.latest) {
-    state.seen = {};
-    state.open = {
-      start: state.latest,
-      startedAt: snap.enqueuedAt,
-      caps: [],
+      lastCaptureKeyBySource: {},
       source: snap.phase.source,
     };
   }
 
-  recordCapture(state, snap.capture, snap.t);
-  recordCapture(state, snap.indicator, snap.t);
+  recordCapture(state, snap.capture, snap.t, 'capture');
+  recordCapture(state, snap.indicator, snap.t, 'indicator');
 
   let closed: ObserveRow | null = null;
   if (!snap.running && state.open) {
@@ -483,6 +474,7 @@ export async function runHyperagentObservePass(options: {
   fetchImpl: ObserveFetch;
   openEventSource?: ObserveSseFactory;
   now?: () => number;
+  fetchTimeoutMs?: number;
 }): Promise<HyperagentObserveResult> {
   const origin = options.origin.replace(/\/$/, '');
   const pathname = options.pathname || '/';
@@ -504,7 +496,7 @@ export async function runHyperagentObservePass(options: {
   };
 
   if (!isHyperagentObserveOrigin(`${origin}/`)) {
-    result.error = `hyperagent-observe is only allowed on hyperagent.com (origin: ${origin})`;
+    result.error = `hyperagent-observe is only allowed on hyperagent.com or www.hyperagent.com (origin: ${origin})`;
     return result;
   }
 
@@ -516,15 +508,35 @@ export async function runHyperagentObservePass(options: {
   }
 
   const state = emptyObserveState(threadId);
+  const fetchTimeoutMs = options.fetchTimeoutMs ?? OBSERVE_FETCH_TIMEOUT_MS;
+
+  const withTimeout = async <T>(promise: Promise<T>, label: string): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<T>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error(`${label} timed out after ${fetchTimeoutMs}ms`)), fetchTimeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) {
+        clearTimeout(timer);
+      }
+    }
+  };
 
   const get = async (path: string): Promise<unknown> => {
     const url = `${origin}${path}`;
     const method = 'GET';
     fetches.push({ url, method });
-    const response = await options.fetchImpl(url, {
-      method,
-      headers: { accept: 'application/json' },
-    });
+    const response = await withTimeout(
+      options.fetchImpl(url, {
+        method,
+        headers: { accept: 'application/json' },
+      }),
+      `GET ${path}`,
+    );
     const used = asGetMethod({ method });
     if (used !== 'GET' && used !== 'HEAD') {
       result.mutatingCalls.push({ url, method: used });

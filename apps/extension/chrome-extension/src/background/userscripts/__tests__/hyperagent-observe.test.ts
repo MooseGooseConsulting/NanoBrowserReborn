@@ -170,7 +170,7 @@ describe('hyperagent observe reducer', () => {
     expect(closed?.calls).toBeGreaterThan(0);
   });
 
-  it('emits one row when a run starts and finishes between snapshots', () => {
+  it('does not fabricate an aggregate row for a run that was never observed running', () => {
     const state = emptyObserveState(THREAD_ID);
     const prior = applyObserveSnapshot(
       state,
@@ -209,12 +209,8 @@ describe('hyperagent observe reducer', () => {
         Date.parse('2026-08-27T12:30:24.114Z'),
       ),
     );
-    expect(missed).not.toBeNull();
-    expect(state.turns).toHaveLength(1);
-    expect(missed?.n).toBe(1);
-    expect(missed?.startedAt).toBe(Date.parse('2026-08-27T12:05:56.063Z'));
-    expect(missed?.endedAt).toBe(Date.parse('2026-08-27T12:30:24.114Z'));
-    expect(missed?.burn).toBe(1_080_000);
+    expect(missed).toBeNull();
+    expect(state.turns).toHaveLength(0);
 
     const again = applyObserveSnapshot(
       state,
@@ -231,7 +227,7 @@ describe('hyperagent observe reducer', () => {
       ),
     );
     expect(again).toBeNull();
-    expect(state.turns).toHaveLength(1);
+    expect(state.turns).toHaveLength(0);
   });
 
   it('does not invent a historical row from the first already-complete snapshot', () => {
@@ -244,7 +240,35 @@ describe('hyperagent observe reducer', () => {
     expect(state.turns).toHaveLength(0);
   });
 
-  it('records equal captures on a later run after resetting seen', () => {
+  it('uses the preceding idle snapshot as the cumulative-usage baseline', () => {
+    const state = emptyObserveState(THREAD_ID);
+    applyObserveSnapshot(state, snap(statusWaiting(), usageBody(0.2, null), breakdownBody(100), 1));
+    applyObserveSnapshot(state, snap(statusRunning(), usageBody(0.4, null), breakdownBody(120), 2));
+    const closed = applyObserveSnapshot(state, snap(statusWaiting(), usageBody(0.5, null), breakdownBody(150), 3));
+
+    expect(closed?.costDelta).toBeCloseTo(0.3);
+    expect(closed?.metered['deepseek-v4-flash Tokens']).toBe(50);
+  });
+
+  it('closes an observed run when the thread reports an error with a stale completion timestamp', () => {
+    const state = emptyObserveState(THREAD_ID);
+    applyObserveSnapshot(state, snap(statusRunning(), usageBody(0.4, null), breakdownBody(100), 100));
+    const closed = applyObserveSnapshot(
+      state,
+      snapshotFromApis(
+        { ...statusRunning(), turnCompleteAt: '2026-08-27T11:30:24.114Z' },
+        threadBody({ lastMessageIsError: true }),
+        usageBody(0.4, null),
+        breakdownBody(100),
+        300,
+      ),
+    );
+
+    expect(closed?.phaseAtClose).toBe('error');
+    expect(closed?.endedAt).toBe(300);
+  });
+
+  it('records equal captures on a later run and does not globally suppress them', () => {
     const state = emptyObserveState(THREAD_ID);
     const capture = {
       input_tokens: 657,
@@ -297,6 +321,22 @@ describe('hyperagent observe reducer', () => {
     expect(state.turns).toHaveLength(2);
     expect(second?.n).toBe(2);
     expect(second?.calls).toBeGreaterThan(0);
+  });
+
+  it('keeps nonconsecutive equal token captures within the same observed run', () => {
+    const state = emptyObserveState(THREAD_ID);
+    const captureA = { input_tokens: 100, output_tokens: 20, cache_read_tokens: 10, cache_create_tokens: 0 };
+    const captureB = { input_tokens: 120, output_tokens: 20, cache_read_tokens: 10, cache_create_tokens: 0 };
+    const noIndicator = threadBody({ lastContextIndicator: null });
+    applyObserveSnapshot(state, snapshotFromApis(statusRunning(), noIndicator, usageBody(0.1, captureA), breakdownBody(100), 1));
+    applyObserveSnapshot(state, snapshotFromApis(statusRunning(), noIndicator, usageBody(0.2, captureB), breakdownBody(110), 2));
+    applyObserveSnapshot(state, snapshotFromApis(statusRunning(), noIndicator, usageBody(0.3, captureA), breakdownBody(120), 3));
+    const closed = applyObserveSnapshot(
+      state,
+      snapshotFromApis(statusWaiting(), noIndicator, usageBody(0.4, captureA), breakdownBody(130), 4),
+    );
+
+    expect(closed?.calls).toBe(3);
   });
 
   it('keeps newest-first numbering after restored history', () => {
@@ -498,6 +538,18 @@ describe('hyperagent observe fetch + SSE pass (mocked)', () => {
     expect(result.rows).toEqual([]);
     expect(result.mutatingCalls).toEqual([]);
     expect(result.fetches.some(call => call.url.endsWith(`/api/threads/${THREAD_ID}/status`))).toBe(true);
+  });
+
+  it('recovers from a hung GET by reporting a bounded observation failure', async () => {
+    const result = await runHyperagentObservePass({
+      origin: 'https://hyperagent.com',
+      pathname: `/thread/${THREAD_ID}`,
+      fetchTimeoutMs: 1,
+      fetchImpl: async () => new Promise<never>(() => {}),
+    });
+
+    expect(result.error).toMatch(/timed out/i);
+    expect(result.mutatingCalls).toEqual([]);
   });
 
   it('drains a delayed SSE cost-updated refresh before closing the handle', async () => {

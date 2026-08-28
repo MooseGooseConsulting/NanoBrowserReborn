@@ -801,10 +801,18 @@ export class ActionBuilder {
           const injected = await injectReviewedOverlay(api, page.tabId, overlay, scriptId);
           if (isHyperagentObserve) {
             const handoff = await waitForHyperagentObserveHandoff(api, page.tabId);
-            if (handoff.error || handoff.mutatingCalls.length) {
-              const error = handoff.error || 'hyperagent-observe detected a non-GET request';
+            if (handoff.error || handoff.mutatingCalls.length || handoff.timedOut) {
+              const error =
+                handoff.error ||
+                (handoff.timedOut
+                  ? 'hyperagent-observe did not receive a completed row before the handoff timeout'
+                  : 'hyperagent-observe detected a non-GET request');
               this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_FAIL, error);
-              return new ActionResult({ error, includeInMemory: true });
+              return new ActionResult({
+                error,
+                extractedContent: formatHyperagentObserveHandoff(handoff),
+                includeInMemory: true,
+              });
             }
             const msg = `${t('act_runUserscript_ok', [scriptId, injected.mode])} observed ${handoff.rows.length} completed row(s)`;
             this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);
@@ -827,10 +835,18 @@ export class ActionBuilder {
         });
         if (isHyperagentObserve) {
           const handoff = await waitForHyperagentObserveHandoff(api, page.tabId);
-          if (handoff.error || handoff.mutatingCalls.length) {
-            const error = handoff.error || 'hyperagent-observe detected a non-GET request';
+          if (handoff.error || handoff.mutatingCalls.length || handoff.timedOut) {
+            const error =
+              handoff.error ||
+              (handoff.timedOut
+                ? 'hyperagent-observe did not receive a completed row before the handoff timeout'
+                : 'hyperagent-observe detected a non-GET request');
             this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_FAIL, error);
-            return new ActionResult({ error, includeInMemory: true });
+            return new ActionResult({
+              error,
+              extractedContent: formatHyperagentObserveHandoff(handoff),
+              includeInMemory: true,
+            });
           }
           const msg = `${t('act_runUserscript_ok', [scriptId, result.mode])} observed ${handoff.rows.length} completed row(s)`;
           this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);

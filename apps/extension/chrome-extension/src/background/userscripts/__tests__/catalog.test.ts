@@ -55,7 +55,7 @@ describe('reviewed userscript catalog', () => {
 });
 
 describe('hyperagent-observe origin gate', () => {
-  it('allows hyperagent.com only', () => {
+  it('allows Hyperagent's approved hostnames only', () => {
     expect(isHyperagentObserveOrigin('https://hyperagent.com/thread/abc')).toBe(true);
     expect(isHyperagentObserveOrigin('https://www.hyperagent.com/')).toBe(true);
     expect(isHyperagentObserveOrigin('https://example.com/')).toBe(false);
