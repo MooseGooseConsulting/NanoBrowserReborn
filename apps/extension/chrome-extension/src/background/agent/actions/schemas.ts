@@ -1,9 +1,5 @@
 import { z } from 'zod';
-import {
-  CHATGPT_ORGANIZE_SCRIPT_ID,
-  FIXTURE_SCRIPT_ID,
-  HYPERAGENT_OBSERVE_SCRIPT_ID,
-} from '../../userscripts/catalog';
+import { CHATGPT_ORGANIZE_SCRIPT_ID, FIXTURE_SCRIPT_ID, HYPERAGENT_OBSERVE_SCRIPT_ID } from '../../userscripts/catalog';
 
 export interface ActionSchema {
   name: string;
@@ -221,6 +217,7 @@ export const waitActionSchema: ActionSchema = {
 
 export const RUN_USERSCRIPT_ACTION = 'run_userscript';
 export const REWRITE_USERSCRIPT_ACTION = 'rewrite_userscript';
+export const HYPERAGENT_MCP_ACTION = 'hyperagent_mcp';
 
 export const USERSCRIPT_ONLY_ACTIONS = [RUN_USERSCRIPT_ACTION, REWRITE_USERSCRIPT_ACTION] as const;
 
@@ -250,14 +247,28 @@ export const rewriteUserscriptActionSchema: ActionSchema = {
     script_id: z
       .enum([FIXTURE_SCRIPT_ID, CHATGPT_ORGANIZE_SCRIPT_ID])
       .describe('reviewed payload id (fixture or chatgpt-organize only)'),
-    source: z
-      .string()
-      .nullable()
-      .optional()
-      .describe('new userscript source text; required unless reset is true'),
-    reset: z
-      .boolean()
-      .optional()
-      .describe('delete the overlay for script_id and restore the packaged seed'),
+    source: z.string().nullable().optional().describe('new userscript source text; required unless reset is true'),
+    reset: z.boolean().optional().describe('delete the overlay for script_id and restore the packaged seed'),
+  }),
+};
+
+export const hyperagentMcpActionSchema: ActionSchema = {
+  name: HYPERAGENT_MCP_ACTION,
+  description:
+    'Call Hyperagent\'s documented MCP server with the session-only bearer token configured in extension Settings. operation "list_tools" discovers the live input schemas. The other operations call only documented MCP tools: list_agents, create_thread, send_message, get_thread, list_threads, or create_attachment_upload. Use this only when the user asks to inspect or dispatch Hyperagent work. Never include or request a bearer token in action arguments. This action does not configure Hyperagent; REST configuration remains unavailable here.',
+  schema: z.object({
+    intent: z.string().default('').describe('purpose of this MCP call'),
+    operation: z
+      .enum([
+        'list_tools',
+        'list_agents',
+        'create_thread',
+        'send_message',
+        'get_thread',
+        'list_threads',
+        'create_attachment_upload',
+      ])
+      .describe('documented Hyperagent MCP operation'),
+    arguments: z.record(z.string(), z.unknown()).default({}).describe('arguments matching the live MCP tool schema'),
   }),
 };

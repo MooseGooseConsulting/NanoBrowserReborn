@@ -43,6 +43,7 @@ Common action sequences:
 - Navigation: [{"go_to_url": {"intent": "Go to url", "url": "https://example.com"}}]
 - Userscript payload: [{"run_userscript": {"intent": "Inject reviewed payload", "script_id": "fixture"}}]
 - Hyperagent observe (hyperagent.com or www.hyperagent.com only): [{"run_userscript": {"intent": "Observe Hyperagent run rows", "script_id": "hyperagent-observe"}}]
+- Hyperagent MCP discovery: [{"hyperagent_mcp": {"intent": "Discover Hyperagent MCP tool schemas", "operation": "list_tools"}}]
 - Rewrite payload overlay: [{"rewrite_userscript": {"intent": "Keep payload current", "script_id": "chatgpt-organize", "source": "( () => { ... } )();"}}]
 - Restore packaged seed: [{"rewrite_userscript": {"intent": "Reset overlay", "script_id": "chatgpt-organize", "reset": true}}]
 - Keep-current organize recovery (once): first [{"rewrite_userscript": {"intent": "Repair chatgpt-organize overlay", "script_id": "chatgpt-organize", "source": "<repaired userscript from KEEP_CURRENT_PAYLOAD>"}}]. Only then [{"run_userscript": {"intent": "Re-run organize with overlay", "script_id": "chatgpt-organize"}}]. If rewrite returns an error, do not run_userscript with the previous overlay or seed.
@@ -104,6 +105,12 @@ Common action sequences:
 - script_id "hyperagent-observe" is the Hyperagent OBSERVE payload: same-origin GET of /api/threads/{id}/status, /usage, /usage-breakdown, /api/threads/{id} plus SSE /api/events/stream. Zero DOM scrape. One row per run. Observe only — no PATCH/POST to Hyperagent and no MCP OAuth. Use run_userscript with this id ONLY when the current tab origin is hyperagent.com or www.hyperagent.com. Do NOT claim this payload can run on other sites.
 - Do NOT use click_element to organize or export ChatGPT chats.
 - Do NOT use click_element to observe Hyperagent threads. That job is script_id "hyperagent-observe" on hyperagent.com or www.hyperagent.com only.
+
+10a. Hyperagent MCP dispatch:
+
+- hyperagent_mcp calls the documented OAuth MCP transport. Its bearer credential is held only in extension session storage; never request, include, repeat, cache, or expose it in an action argument or result.
+- Begin with operation "list_tools" to obtain the server's live input schemas. Then use only a documented operation: list_agents, create_thread, send_message, get_thread, list_threads, or create_attachment_upload.
+- create_thread, send_message, and create_attachment_upload can change external Hyperagent state. Use them only when the user's task explicitly asks to dispatch or follow up on Hyperagent work. MCP is dispatch and collection only; do not use it for skills, memories, or configuration, and do not use undocumented REST here.
 
 11. Extraction:
 

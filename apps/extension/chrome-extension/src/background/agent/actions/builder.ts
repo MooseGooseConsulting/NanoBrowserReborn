@@ -24,6 +24,7 @@ import {
   scrollToBottomActionSchema,
   runUserscriptActionSchema,
   rewriteUserscriptActionSchema,
+  hyperagentMcpActionSchema,
 } from './schemas';
 import { z } from 'zod';
 import { createLogger } from '@src/background/log';
@@ -47,7 +48,11 @@ import {
   unregisterChatGptOrganize,
   waitForChatGptOrganizeDone,
 } from '@src/background/userscripts/organize-run';
-import { chromeOverlayStorage, type OverlayStorageApi, type UserscriptOverlay } from '@src/background/userscripts/overlay';
+import {
+  chromeOverlayStorage,
+  type OverlayStorageApi,
+  type UserscriptOverlay,
+} from '@src/background/userscripts/overlay';
 import { injectReviewedOverlay, resolveRunSource, rewriteUserscript } from '@src/background/userscripts/rewrite';
 import { HYPERAGENT_OBSERVE_SCRIPT_ID, isReviewedUserscriptId } from '@src/background/userscripts/catalog';
 import { buildKeepCurrentActionResult } from '@src/background/userscripts/keep-current';
@@ -55,6 +60,13 @@ import {
   formatHyperagentObserveHandoff,
   waitForHyperagentObserveHandoff,
 } from '@src/background/userscripts/hyperagent-observe-run';
+import { hyperagentMcpStore } from '@extension/storage';
+import {
+  formatHyperagentMcpResult,
+  HyperagentMcpClient,
+  isHyperagentMcpWriteOperation,
+  type HyperagentMcpOperation,
+} from './hyperagent-mcp';
 
 const logger = createLogger('Action');
 
@@ -772,9 +784,7 @@ export class ActionBuilder {
                     scriptId,
                     storage,
                     alreadyRewritten: this.context.keepCurrentRewrittenScriptIds.has(scriptId),
-                    injected: overlay
-                      ? { kind: 'overlay', overlay }
-                      : { kind: 'seed' },
+                    injected: overlay ? { kind: 'overlay', overlay } : { kind: 'seed' },
                   }),
                 );
               }
@@ -908,6 +918,44 @@ export class ActionBuilder {
       }
     }, rewriteUserscriptActionSchema);
     actions.push(rewriteUserscriptAction);
+
+    const hyperagentMcpAction = new Action(async (input: z.infer<typeof hyperagentMcpActionSchema.schema>) => {
+      const intent = input.intent || `Call Hyperagent MCP ${input.operation}`;
+      this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_START, intent);
+
+      try {
+        if (
+          isHyperagentMcpWriteOperation(input.operation) &&
+          this.context.runSession.getClock().runningTurnSource !== 'user'
+        ) {
+          const actionError = `Hyperagent MCP ${input.operation} requires a user-requested dispatch or follow-up task`;
+          this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_FAIL, actionError);
+          return new ActionResult({ error: actionError, includeInMemory: true });
+        }
+        const accessToken = await hyperagentMcpStore.getAccessToken();
+        const client = new HyperagentMcpClient({ accessToken, allowWriteTools: true });
+        const result =
+          input.operation === 'list_tools'
+            ? await client.listTools()
+            : await client.callTool(input.operation, input.arguments);
+        const content = formatHyperagentMcpResult(input.operation as HyperagentMcpOperation, result, accessToken);
+        const actionError =
+          result && typeof result === 'object' && 'isError' in result && result.isError === true
+            ? `Hyperagent MCP ${input.operation} returned a tool error`
+            : null;
+        if (actionError) {
+          this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_FAIL, actionError);
+          return new ActionResult({ error: actionError, extractedContent: content, includeInMemory: true });
+        }
+        this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, `Hyperagent MCP ${input.operation} completed`);
+        return new ActionResult({ extractedContent: content, includeInMemory: true });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_FAIL, message);
+        return new ActionResult({ error: message, includeInMemory: true });
+      }
+    }, hyperagentMcpActionSchema);
+    actions.push(hyperagentMcpAction);
 
     return actions;
   }

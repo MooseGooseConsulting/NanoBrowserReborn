@@ -10,9 +10,9 @@ Set-of-marks is **optional**. Do not rebuild `buildDomTree` / `highlightIndex`. 
 
 ## The only plan
 
-1. **On main** — runner/fixture, ChatGPT organize, the overlay keep-current loop, and four-state Leader/Follower handling are landed.
-2. **This PR** — Hyperagent OBSERVE (`hyperagent-observe`): same-origin GET + SSE, one telemetry row per observed enqueue-to-complete run, no Hyperagent writes.
-3. **Later** — Stagehand host after a real CDP 5-step; MCP dispatch/config REST behind contract tests; LangGraph; marks/SAM.
+1. **On main** — runner/fixture, ChatGPT organize, the overlay keep-current loop, four-state Leader/Follower handling, and Hyperagent OBSERVE are landed.
+2. **This PR** — Hyperagent MCP dispatch: session-only bearer configuration plus documented MCP initialize, tool discovery, and dispatch/collection calls.
+3. **Later** — Stagehand host; config REST behind contract tests; LangGraph; marks/SAM.
 
 ## On main (item 1)
 
@@ -20,23 +20,29 @@ Set-of-marks is **optional**. Do not rebuild `buildDomTree` / `highlightIndex`. 
 - `chatgpt-organize` is a one-shot `chatgpt.com` job: same-origin fetch and title PATCH; its recovery loop is capped to one repaired overlay retry.
 - Four-state Leader/Follower execution is merged. Keep replay, follow-up, pause/resume/cancel, and execution ordering intact.
 
-## This PR (item 2) — Hyperagent observe
+## On main (item 1) — Hyperagent observe
 
 `hyperagent-observe` is origin-gated to `hyperagent.com` and `www.hyperagent.com`. It reads `/api/threads/{id}/status`, `/usage`, `/usage-breakdown`, and `/api/threads/{id}` with same-origin GET and treats SSE `/api/events/stream` as a refresh signal. It performs no DOM scraping, `PATCH`, `POST`, or MCP OAuth. A changed latest status enqueue/complete pair supports one recovered offscreen row; multiple cycles entirely between observations remain an explicit coverage gap because the status surface has no history.
 
-This PR must return observed rows through `run_userscript`; it must not merely inject a page-local observer. Backend ingestion, MCP dispatch, and REST configuration are follow-on work.
+The observer returns rows through `run_userscript`; it does not merely inject a page-local observer. Backend ingestion, MCP dispatch, and REST configuration are separate work.
+
+## This PR (item 2) — Hyperagent MCP dispatch
+
+`hyperagent_mcp` speaks the documented `https://hyperagent.com/api/mcp` JSON-RPC transport. It initializes a protocol session, exposes `list_tools` for live schemas, then calls only the six documented MCP tools. The bearer token is held in extension-only `chrome.storage.session`, is never passed through an action argument or logged, and is cleared when Chrome exits. `create_thread`, `send_message`, and attachment upload are external writes and must be invoked only for a user-requested dispatch or follow-up.
+
+MCP remains dispatch and collection only. Skills, memories, and configuration are not MCP capabilities; undocumented REST configuration stays behind future contract tests.
 
 ## Later (item 3)
 
 Do not start these from the runner or from the observe stacked PR:
 
-- Stagehand host, and only after a real CDP 5-step has been run once (connect, observe, one `act`, teardown that leaves Chrome running)
-- Four-state completion (PR #4 already exists elsewhere)
-- MCP / REST
+- Stagehand host (the real CDP 5-step prerequisite has been run: connect, observe, one action, teardown while Chrome remained running)
+- Four-state completion (PR #4 is merged)
+- REST configuration behind contract tests
 - LangGraph overlay (pause/resume/cancel, side-panel events, `iteration` vs `navigationSteps`)
 - Marks / SAM (measure `buildDomTree` volume; route observe through Stagehand; SAM 3 only if observe is not enough)
 
-No host code until that CDP 5-step has been run once. Do not start with MarkMap, SQLite, or Spec Kit regeneration.
+Do not start with MarkMap, SQLite, or Spec Kit regeneration.
 
 ## Gates that stay
 
@@ -50,7 +56,7 @@ Automated coverage (necessary, not sufficient):
 pnpm -F chrome-extension test
 ```
 
-Must cover current-origin registration, injection safety, ChatGPT keep-current recovery, and Hyperagent status/usage/SSE reduction and row handoff. No CI test is a live ChatGPT or Hyperagent login qualification.
+Must cover current-origin registration, injection safety, ChatGPT keep-current recovery, Hyperagent status/usage/SSE reduction and row handoff, and MCP initialization/tool-call contracts. No CI test is a live ChatGPT or Hyperagent login qualification.
 
 From `apps/extension` after `corepack pnpm install`, still run:
 
