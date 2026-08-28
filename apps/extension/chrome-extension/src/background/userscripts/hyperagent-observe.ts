@@ -283,7 +283,7 @@ function byokDelta(
 }
 
 function sumCaptures(list: Array<TokenSplit>): TokenSplit & { peak: number } {
-  return list.reduce(
+  return list.reduce<TokenSplit & { peak: number }>(
     (acc, cap) => {
       acc.input += cap.input;
       acc.output += cap.output;

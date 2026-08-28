@@ -408,7 +408,7 @@ describe('run_userscript action schema', () => {
     expect(() => runUserscriptActionSchema.schema.parse({ script_id: 'not-a-payload' })).toThrow();
     expect(() => runUserscriptActionSchema.schema.parse({ script_id: 'chatgpt-export' })).toThrow();
     expect(runUserscriptActionSchema.description).toMatch(/hyperagent-observe/);
-    expect(runUserscriptActionSchema.description).toMatch(/hyperagent\.com only/);
+    expect(runUserscriptActionSchema.description).toMatch(/hyperagent\.com or www\.hyperagent\.com/);
   });
 });
 
