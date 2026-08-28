@@ -8,7 +8,6 @@
     'hyperagent.com': true,
     'www.hyperagent.com': true,
   };
-  const STATE_KEY = 'hyperagent-observe:rows';
   const STOP_KEY = '__nanoHyperagentObserveStop';
   const RUN_MS = 2000;
   const IDLE_MS = 10000;
@@ -47,6 +46,7 @@
   let pathInterval = null;
   let es = null;
   let busy = false;
+  let refreshQueued = false;
   let stopped = false;
   let generation = 0;
   let threadId = null;
@@ -81,10 +81,10 @@
         source,
       };
     }
-    if (queued) return { k: 'queued', label: 'queued x' + queued, queued, since: completeAt, source };
     if (thread && thread.lastMessageIsError) {
       return { k: 'error', label: 'stopped on error', queued: 0, since: completeAt, source };
     }
+    if (queued) return { k: 'queued', label: 'queued x' + queued, queued, since: completeAt, source };
     if (!enqueuedAt && !completeAt) return { k: 'new', label: 'no runs yet', queued: 0, since: 0, source };
     if (status.lastRunMessageRole === 'assistant') {
       return { k: 'waiting', label: 'waiting for you', queued: 0, since: completeAt, source };
@@ -193,11 +193,6 @@
     return state.turns.reduce((max, turn) => Math.max(max, turn.n || 0), 0) + 1;
   }
 
-  function closedCostDelta(open, snap) {
-    const usageDelta = (snap.cost || 0) - (open.start.cost || 0);
-    return usageDelta > 0 ? usageDelta : open.streamCost || 0;
-  }
-
   function closeTurn(snap) {
     const open = state.open;
     const metered = meteredDelta(open.start.items, snap.items);
@@ -220,7 +215,8 @@
       byok: byokDelta(open.start.byok, snap.byok),
       calls: open.caps.length,
       sampled: sumCaptures(open.caps),
-      costDelta: closedCostDelta(open, snap),
+      // /usage is authoritative. SSE asks for a refresh; it is never accounting data.
+      costDelta: Math.max(0, (snap.cost || 0) - (open.start.cost || 0)),
       phaseAtClose: snap.phase.k,
     };
     state.turns.unshift(row);
@@ -250,7 +246,6 @@
         start: snap,
         startedAt: snap.enqueuedAt || snap.t,
         caps: [],
-        streamCost: 0,
         source: snap.phase.source,
       };
     } else if (completedOffscreenCycle(snap)) {
@@ -259,7 +254,6 @@
         start: state.latest,
         startedAt: snap.enqueuedAt,
         caps: [],
-        streamCost: 0,
         source: snap.phase.source,
       };
     }
@@ -282,6 +276,15 @@
     });
     if (!response.ok) throw new Error(path + ' ' + response.status);
     return response.json();
+  }
+
+  function requestRefresh() {
+    if (stopped || !threadId || !state) return;
+    if (busy) {
+      refreshQueued = true;
+      return;
+    }
+    void refresh();
   }
 
   async function refresh() {
@@ -327,7 +330,12 @@
     } finally {
       if (gen === generation) {
         busy = false;
-        schedule();
+        if (refreshQueued) {
+          refreshQueued = false;
+          queueMicrotask(requestRefresh);
+        } else {
+          schedule();
+        }
       }
     }
   }
@@ -341,7 +349,6 @@
     }
     if (parsed.type === 'cost-updated') {
       state.streamEvents += 1;
-      if (state.open) state.open.streamCost += parsed.costDeltaUsd || 0;
       return 'refresh';
     }
     return 'ignore';
@@ -379,7 +386,7 @@
       };
       es.onmessage = event => {
         if (stopped || gen !== generation || threadId !== id || !state) return;
-        if (handleSseData(event.data) === 'refresh') refresh();
+        if (handleSseData(event.data) === 'refresh') requestRefresh();
       };
     } catch (error) {
       if (state) state.streamUp = false;
@@ -392,7 +399,7 @@
     if (timer) clearTimeout(timer);
     const running = state && state.latest && state.latest.running;
     timer = setTimeout(() => {
-      refresh();
+      requestRefresh();
     }, running ? RUN_MS : IDLE_MS);
   }
 
@@ -413,17 +420,6 @@
     banner.textContent = status;
   }
 
-  function persist() {
-    if (!threadId) return;
-    GM_setValue(STATE_KEY, {
-      fetched_at: Date.now(),
-      origin: result.origin,
-      threadId,
-      rows: state ? state.turns.slice(0, 50) : result.rows,
-      error: result.error,
-    });
-  }
-
   function publish() {
     result.threadId = threadId;
     result.error = state ? state.err : result.error;
@@ -433,7 +429,6 @@
     result.streamUp = state ? state.streamUp : null;
     result.mutatingCalls = result.fetches.filter(call => call.method !== 'GET' && call.method !== 'HEAD');
     globalThis.__nanoHyperagentObserve = result;
-    persist();
     const phase = result.latest && result.latest.phase ? result.latest.phase.label : 'idle';
     const err = result.error ? '\nerror: ' + result.error : '';
     paint(
@@ -472,6 +467,7 @@
     stopped = true;
     generation += 1;
     busy = false;
+    refreshQueued = false;
     if (timer) {
       clearTimeout(timer);
       timer = null;
@@ -505,6 +501,7 @@
     if (!id) {
       generation += 1;
       busy = false;
+      refreshQueued = false;
       result.error = 'No Hyperagent thread id in the URL. Open /thread/{id}.';
       result.done = true;
       resetPublishedThread();
@@ -520,17 +517,14 @@
 
     generation += 1;
     busy = false;
+    refreshQueued = false;
     threadId = id;
-    const saved = GM_getValue(STATE_KEY, null);
     state = emptyState(id);
-    if (saved && saved.threadId === id && Array.isArray(saved.rows)) {
-      state.turns = saved.rows.slice();
-    }
     result.error = null;
     result.done = false;
     paint('Nano Reborn Hyperagent observe: fetching /status /usage /usage-breakdown…');
     openStream();
-    refresh();
+    requestRefresh();
   }
 
   let lastPath = location.pathname;

@@ -61,7 +61,6 @@ export interface OpenRun {
   start: ObserveSnapshot;
   startedAt: number;
   caps: Array<TokenSplit & { t: number }>;
-  streamCost: number;
   source: string | null;
 }
 
@@ -117,6 +116,8 @@ export interface UsageBreakdownPayload {
 }
 
 const ZERO: TokenSplit = { input: 0, output: 0, cacheRead: 0, cacheCreate: 0 };
+export const MAX_OBSERVE_TURNS = 300;
+export const MAX_OBSERVE_CAPTURES = 5000;
 
 export function threadIdFromPath(pathname: string): string | null {
   const match = pathname.match(HYPERAGENT_THREAD_PATH);
@@ -146,11 +147,11 @@ export function classifyRunPhase(status: ThreadStatusPayload, thread?: ThreadPay
       source,
     };
   }
-  if (queued) {
-    return { k: 'queued', label: `queued x${queued}`, queued, since: completeAt, source };
-  }
   if (thread && thread.lastMessageIsError) {
     return { k: 'error', label: 'stopped on error', queued: 0, since: completeAt, source };
+  }
+  if (queued) {
+    return { k: 'queued', label: `queued x${queued}`, queued, since: completeAt, source };
   }
   if (!enqueuedAt && !completeAt) {
     return { k: 'new', label: 'no runs yet', queued: 0, since: 0, source };
@@ -306,14 +307,12 @@ function recordCapture(state: ObserveReducerState, split: TokenSplit | null, at:
   state.seen[key] = 1;
   const rec = { t: at, ...split };
   state.captures.push(rec);
+  if (state.captures.length > MAX_OBSERVE_CAPTURES) {
+    state.captures.splice(0, state.captures.length - MAX_OBSERVE_CAPTURES);
+  }
   if (state.open) {
     state.open.caps.push(rec);
   }
-}
-
-function closedCostDelta(open: OpenRun, snap: ObserveSnapshot): number {
-  const usageDelta = (snap.cost || 0) - (open.start.cost || 0);
-  return usageDelta > 0 ? usageDelta : open.streamCost || 0;
 }
 
 function closeTurn(state: ObserveReducerState, snap: ObserveSnapshot): ObserveRow {
@@ -340,10 +339,15 @@ function closeTurn(state: ObserveReducerState, snap: ObserveSnapshot): ObserveRo
     byok: byokDelta(open.start.byok, snap.byok),
     calls: open.caps.length,
     sampled: sumCaptures(open.caps),
-    costDelta: closedCostDelta(open, snap),
+    // /usage cumulative totals are the accounting authority. SSE asks us to re-read them;
+    // an SSE delta is never substituted or added, avoiding double-counted run cost.
+    costDelta: Math.max(0, (snap.cost || 0) - (open.start.cost || 0)),
     phaseAtClose: snap.phase.k,
   };
   state.turns.unshift(row);
+  if (state.turns.length > MAX_OBSERVE_TURNS) {
+    state.turns.length = MAX_OBSERVE_TURNS;
+  }
   state.open = null;
   return row;
 }
@@ -369,7 +373,6 @@ export function applyObserveSnapshot(state: ObserveReducerState, snap: ObserveSn
       start: snap,
       startedAt: snap.enqueuedAt || snap.t,
       caps: [],
-      streamCost: 0,
       source: snap.phase.source,
     };
   } else if (completedOffscreenCycle(state, snap) && state.latest) {
@@ -378,7 +381,6 @@ export function applyObserveSnapshot(state: ObserveReducerState, snap: ObserveSn
       start: state.latest,
       startedAt: snap.enqueuedAt,
       caps: [],
-      streamCost: 0,
       source: snap.phase.source,
     };
   }
@@ -395,7 +397,7 @@ export function applyObserveSnapshot(state: ObserveReducerState, snap: ObserveSn
 }
 
 export function handleSseData(state: ObserveReducerState, data: string): 'refresh' | 'ignore' {
-  let parsed: { type?: string; costDeltaUsd?: number };
+  let parsed: { type?: string };
   try {
     parsed = JSON.parse(data) as { type?: string; costDeltaUsd?: number };
   } catch {
@@ -403,9 +405,6 @@ export function handleSseData(state: ObserveReducerState, data: string): 'refres
   }
   if (parsed.type === 'cost-updated') {
     state.streamEvents += 1;
-    if (state.open) {
-      state.open.streamCost += parsed.costDeltaUsd || 0;
-    }
     return 'refresh';
   }
   return 'ignore';
@@ -606,4 +605,3 @@ export async function runHyperagentObservePass(options: {
   result.error = result.error || state.err;
   return result;
 }
-

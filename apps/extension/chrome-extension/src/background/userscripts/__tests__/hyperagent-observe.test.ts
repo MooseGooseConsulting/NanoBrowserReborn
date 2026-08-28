@@ -1,9 +1,14 @@
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import vm from 'node:vm';
 import { describe, expect, it } from 'vitest';
 import {
   applyObserveSnapshot,
   classifyRunPhase,
   emptyObserveState,
   handleSseData,
+  MAX_OBSERVE_TURNS,
   observeJsonResponse,
   runHyperagentObservePass,
   snapshotFromApis,
@@ -96,6 +101,9 @@ describe('hyperagent observe reducer', () => {
     ).toBe('queued');
     expect(classifyRunPhase(statusWaiting(), threadBody()).k).toBe('waiting');
     expect(classifyRunPhase(statusWaiting(), threadBody({ lastMessageIsError: true })).k).toBe('error');
+    expect(
+      classifyRunPhase({ ...statusWaiting(), pendingQueue: [{ id: 'later' }] }, threadBody({ lastMessageIsError: true })).k,
+    ).toBe('error');
   });
 
   it('keeps running when a queue is stacked behind an in-flight turn', () => {
@@ -341,7 +349,34 @@ describe('hyperagent observe reducer', () => {
     expect(state.turns[0].n).toBe(51);
   });
 
-  it('treats cost-updated SSE as a refresh cue and accumulates stream cost on the open run', () => {
+  it('bounds retained completed rows while preserving monotonically increasing row numbers', () => {
+    const state = emptyObserveState(THREAD_ID);
+    state.turns = Array.from({ length: MAX_OBSERVE_TURNS }, (_, index) => ({
+      n: MAX_OBSERVE_TURNS - index,
+      threadId: THREAD_ID,
+      startedAt: 1,
+      endedAt: 2,
+      ms: 1,
+      seconds: 0,
+      model: null,
+      source: 'chat',
+      metered: {},
+      burn: 0,
+      byok: {},
+      calls: 0,
+      sampled: { input: 0, output: 0, cacheRead: 0, cacheCreate: 0, peak: 0 },
+      costDelta: 0,
+      phaseAtClose: 'waiting' as const,
+    }));
+    applyObserveSnapshot(state, snap(statusRunning(), usageBody(0.4, null), breakdownBody(100), 100));
+    const closed = applyObserveSnapshot(state, snap(statusWaiting(), usageBody(0.5, null), breakdownBody(120), 200));
+
+    expect(closed?.n).toBe(MAX_OBSERVE_TURNS + 1);
+    expect(state.turns).toHaveLength(MAX_OBSERVE_TURNS);
+    expect(state.turns[0].n).toBe(MAX_OBSERVE_TURNS + 1);
+  });
+
+  it('treats cost-updated SSE as a refresh cue while /usage remains authoritative for cost', () => {
     const state = emptyObserveState(THREAD_ID);
     applyObserveSnapshot(
       state,
@@ -351,7 +386,6 @@ describe('hyperagent observe reducer', () => {
     expect(handleSseData(state, '{"type":"connected"}')).toBe('ignore');
     expect(handleSseData(state, '{"type":"cost-updated","costDeltaUsd":0.0028}')).toBe('refresh');
     expect(state.streamEvents).toBe(1);
-    expect(state.open?.streamCost).toBeCloseTo(0.0028);
     applyObserveSnapshot(
       state,
       snap(statusWaiting(), usageBody(0.4785, null), breakdownBody(15_080_000), Date.parse('2026-08-27T12:30:24.114Z')),
@@ -359,7 +393,7 @@ describe('hyperagent observe reducer', () => {
     expect(state.turns[0].costDelta).toBeCloseTo(0.0785);
   });
 
-  it('falls back to SSE cost only when the usage totals did not move', () => {
+  it('does not use an SSE delta as a fallback when usage totals did not move', () => {
     const state = emptyObserveState(THREAD_ID);
     applyObserveSnapshot(
       state,
@@ -370,7 +404,7 @@ describe('hyperagent observe reducer', () => {
       state,
       snap(statusWaiting(), usageBody(0.4, null), breakdownBody(100), Date.parse('2026-08-27T12:30:24.114Z')),
     );
-    expect(state.turns[0].costDelta).toBeCloseTo(0.01);
+    expect(state.turns[0].costDelta).toBe(0);
   });
 });
 
@@ -520,5 +554,108 @@ describe('hyperagent observe fetch + SSE pass (mocked)', () => {
     expect(result.error).toMatch(/thread id/i);
     expect(result.fetches).toEqual([]);
     expect(result.mutatingCalls).toEqual([]);
+  });
+});
+
+type PublicResponse = { ok: boolean; status: number; json: () => Promise<unknown> };
+type PublicEventSource = {
+  onopen: (() => void) | null;
+  onerror: (() => void) | null;
+  onmessage: ((event: { data: string }) => void) | null;
+  close: () => void;
+};
+
+function packagedObserveSource(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return readFileSync(resolve(here, '../../../../public/userscripts/hyperagent-observe.user.js'), 'utf8');
+}
+
+function publicJson(body: unknown): PublicResponse {
+  return { ok: true, status: 200, json: async () => body };
+}
+
+describe('packaged hyperagent observer (mocked browser)', () => {
+  it('serializes an SSE refresh received during an in-flight GET cycle and accounts only from /usage', async () => {
+    let resolveFirstStatus: (() => void) | undefined;
+    const firstStatus = new Promise<void>(resolve => {
+      resolveFirstStatus = resolve;
+    });
+    let statusCalls = 0;
+    let eventSource: PublicEventSource | undefined;
+    let banner: { dataset: Record<string, string>; style: { cssText: string }; textContent: string; id: string } | null = null;
+    const context: Record<string, unknown> = {
+      location: new URL(`https://hyperagent.com/thread/${THREAD_ID}`),
+      document: {
+        body: { prepend() {} },
+        querySelector: () => banner,
+        createElement: () => {
+          banner = { dataset: {}, style: { cssText: '' }, textContent: '', id: '' };
+          return banner;
+        },
+      },
+      fetch: async (url: string): Promise<PublicResponse> => {
+        if (url.endsWith('/status')) {
+          statusCalls += 1;
+          if (statusCalls === 1) {
+            await firstStatus;
+            return publicJson(statusRunning());
+          }
+          return publicJson(statusWaiting());
+        }
+        if (url.endsWith(`/${THREAD_ID}`) && !url.includes('/status') && !url.includes('/usage')) {
+          return publicJson(threadBody());
+        }
+        if (url.endsWith('/usage') && !url.endsWith('/usage-breakdown')) {
+          return publicJson(usageBody(0.4, null));
+        }
+        if (url.endsWith('/usage-breakdown')) {
+          return publicJson(breakdownBody(statusCalls === 1 ? 100 : 120));
+        }
+        return { ok: false, status: 404, json: async () => ({}) };
+      },
+      EventSource: function () {
+        eventSource = { onopen: null, onerror: null, onmessage: null, close() {} };
+        return eventSource;
+      },
+      setTimeout,
+      clearTimeout,
+      setInterval: () => 1,
+      clearInterval: () => {},
+      queueMicrotask,
+      Promise,
+      Date,
+      JSON,
+      Math,
+      Array,
+      Object,
+      String,
+      Number,
+      Boolean,
+      Error,
+      window: null,
+    };
+    context.window = context;
+    context.globalThis = context;
+    (context.window as { addEventListener: () => void; removeEventListener: () => void }).addEventListener = () => {};
+    (context.window as { addEventListener: () => void; removeEventListener: () => void }).removeEventListener = () => {};
+
+    vm.runInNewContext(packagedObserveSource(), context, { timeout: 5000 });
+    expect(eventSource).toBeDefined();
+    eventSource?.onmessage?.({ data: JSON.stringify({ type: 'cost-updated', costDeltaUsd: 0.55 }) });
+    resolveFirstStatus?.();
+
+    const started = Date.now();
+    while (Date.now() - started < 5000) {
+      const observed = context.__nanoHyperagentObserve as { rows?: Array<{ costDelta?: number }> } | undefined;
+      if (statusCalls >= 2 && observed?.rows?.length) {
+        expect(observed.rows[0].costDelta).toBe(0);
+        break;
+      }
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    expect(statusCalls).toBe(2);
+    expect((context.__nanoHyperagentObserve as { rows?: unknown[] }).rows).toHaveLength(1);
+    expect(packagedObserveSource()).not.toMatch(/GM_(get|set)Value|localStorage/);
+    (context.__nanoHyperagentObserveStop as (() => void) | undefined)?.();
   });
 });

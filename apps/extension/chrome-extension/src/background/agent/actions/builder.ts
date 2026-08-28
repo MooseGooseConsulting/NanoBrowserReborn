@@ -49,8 +49,12 @@ import {
 } from '@src/background/userscripts/organize-run';
 import { chromeOverlayStorage, type OverlayStorageApi, type UserscriptOverlay } from '@src/background/userscripts/overlay';
 import { injectReviewedOverlay, resolveRunSource, rewriteUserscript } from '@src/background/userscripts/rewrite';
-import { isReviewedUserscriptId } from '@src/background/userscripts/catalog';
+import { HYPERAGENT_OBSERVE_SCRIPT_ID, isReviewedUserscriptId } from '@src/background/userscripts/catalog';
 import { buildKeepCurrentActionResult } from '@src/background/userscripts/keep-current';
+import {
+  formatHyperagentObserveHandoff,
+  waitForHyperagentObserveHandoff,
+} from '@src/background/userscripts/hyperagent-observe-run';
 
 const logger = createLogger('Action');
 
@@ -750,6 +754,7 @@ export class ActionBuilder {
         ranOverlay = await resolveRunSource(overlayStorage, scriptId);
         const overlay = ranOverlay;
         const isOrganize = isChatGptOrganizeScript(scriptId);
+        const isHyperagentObserve = scriptId === HYPERAGENT_OBSERVE_SCRIPT_ID;
         if (isOrganize) {
           assertChatGptOrganizeTabAllowed(tabUrl, firewall.allowedUrls, firewall.deniedUrls);
           const storage = overlayStorage;
@@ -794,6 +799,20 @@ export class ActionBuilder {
           }
           assertUserscriptOrigin(scriptId, tabUrl);
           const injected = await injectReviewedOverlay(api, page.tabId, overlay, scriptId);
+          if (isHyperagentObserve) {
+            const handoff = await waitForHyperagentObserveHandoff(api, page.tabId);
+            if (handoff.error || handoff.mutatingCalls.length) {
+              const error = handoff.error || 'hyperagent-observe detected a non-GET request';
+              this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_FAIL, error);
+              return new ActionResult({ error, includeInMemory: true });
+            }
+            const msg = `${t('act_runUserscript_ok', [scriptId, injected.mode])} observed ${handoff.rows.length} completed row(s)`;
+            this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);
+            return new ActionResult({
+              extractedContent: formatHyperagentObserveHandoff(handoff),
+              includeInMemory: true,
+            });
+          }
           const msg = t('act_runUserscript_ok', [scriptId, injected.mode]);
           this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);
           return new ActionResult({ extractedContent: msg, includeInMemory: true });
@@ -806,6 +825,20 @@ export class ActionBuilder {
           allowList: firewall.allowedUrls,
           denyList: firewall.deniedUrls,
         });
+        if (isHyperagentObserve) {
+          const handoff = await waitForHyperagentObserveHandoff(api, page.tabId);
+          if (handoff.error || handoff.mutatingCalls.length) {
+            const error = handoff.error || 'hyperagent-observe detected a non-GET request';
+            this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_FAIL, error);
+            return new ActionResult({ error, includeInMemory: true });
+          }
+          const msg = `${t('act_runUserscript_ok', [scriptId, result.mode])} observed ${handoff.rows.length} completed row(s)`;
+          this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);
+          return new ActionResult({
+            extractedContent: formatHyperagentObserveHandoff(handoff),
+            includeInMemory: true,
+          });
+        }
         const msg = t('act_runUserscript_ok', [scriptId, result.mode]);
         this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);
         return new ActionResult({ extractedContent: msg, includeInMemory: true });
