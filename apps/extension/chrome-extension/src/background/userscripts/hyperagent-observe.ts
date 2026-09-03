@@ -410,11 +410,11 @@ function classifyWindow(
 
 function reduceAccountingWindow(state: ObserveReducerState, snap: ObserveSnapshot): ObserveLedgerWindow | null {
   const prev = state.accountingPrev;
-  const events = state.pendingSse.splice(0);
   if (!prev) {
     state.accountingPrev = snap;
     return null;
   }
+  const events = state.pendingSse.splice(0);
   const modelDeltas = itemDelta(prev.items, snap.items);
   const byokDeltas = byokDelta(prev.byok, snap.byok);
   const accountingCostDeltaUsd = Math.max(0, snap.cost - prev.cost);
