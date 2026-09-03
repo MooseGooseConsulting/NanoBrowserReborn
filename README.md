@@ -1,6 +1,6 @@
 # Nano Reborn
 
-Independent derivative of [nanobrowser/nanobrowser](https://github.com/nanobrowser/nanobrowser) (13.7k stars, Apache-2.0). Not affiliated with that project. We grabbed the agent system (Leader/Planner + Follower/Navigator) and are replacing obsolete browser guts with current [Stagehand](https://github.com/browserbase/stagehand) (24.1k stars) plus userscript invocation.
+Independent derivative of [nanobrowser/nanobrowser](https://github.com/nanobrowser/nanobrowser) (13.7k stars, Apache-2.0). Not affiliated with that project. We grabbed the agent system (Leader/Planner + Follower/Navigator) and are replacing obsolete browser guts with an in-browser MV3 actuator and a `BrowserPort` seam (optional Stagehand CDP host behind the same plug per ADR-003) plus reviewed userscript invocation.
 
 This is not a GitHub fork and is not intended to merge upstream.
 
