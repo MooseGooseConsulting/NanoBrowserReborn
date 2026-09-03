@@ -93,13 +93,14 @@ export interface OpenRun {
   caps: Array<TokenSplit & { t: number; source?: 'capture' | 'indicator' }>;
   lastMainCaptureKey: string | null;
   source: string | null;
-  ledgerStartSeq: number;
+  split: AttributionSplit;
 }
 
-export interface PendingSseCost {
-  seq: number;
-  t: number;
-  costDeltaUsd: number;
+export interface PendingSseSummary {
+  count: number;
+  firstSeq: number | null;
+  lastSeq: number | null;
+  costUsd: number;
 }
 
 export interface ObserveReducerState {
@@ -109,7 +110,8 @@ export interface ObserveReducerState {
   ledger: ObserveLedgerWindow[];
   ledgerSeq: number;
   accountingPrev: ObserveSnapshot | null;
-  pendingSse: PendingSseCost[];
+  breakdownGap: boolean;
+  pendingSse: PendingSseSummary;
   lastMainCaptureKey: string | null;
   open: OpenRun | null;
   latest: ObserveSnapshot | null;
@@ -177,6 +179,19 @@ export const MAX_OBSERVE_TURNS = 300;
 export const MAX_OBSERVE_CAPTURES = 5000;
 export const MAX_OBSERVE_LEDGER = 2500;
 export const OBSERVE_FETCH_TIMEOUT_MS = 15_000;
+export const OBSERVE_BILLING_TIMEOUT_MS = 2_500;
+
+function emptyPendingSse(): PendingSseSummary {
+  return { count: 0, firstSeq: null, lastSeq: null, costUsd: 0 };
+}
+
+function emptyAttributionSplit(): AttributionSplit {
+  return {
+    tokens: { main: 0, subagent: 0, mixed: 0, unknown: 0 },
+    events: { main: 0, subagent: 0, mixed: 0, unknown: 0 },
+    windows: { main: 0, subagent: 0, mixed: 0, unknown: 0 },
+  };
+}
 
 export function threadIdFromPath(pathname: string): string | null {
   const match = pathname.match(HYPERAGENT_THREAD_PATH);
@@ -281,7 +296,8 @@ export function emptyObserveState(threadId: string): ObserveReducerState {
     ledger: [],
     ledgerSeq: 0,
     accountingPrev: null,
-    pendingSse: [],
+    breakdownGap: false,
+    pendingSse: emptyPendingSse(),
     lastMainCaptureKey: null,
     open: null,
     latest: null,
@@ -344,23 +360,35 @@ function itemTokenDelta(items: Record<string, MeteredItem>): number {
   return Object.entries(items).reduce((sum, [name, x]) => (/Tokens$/i.test(name) ? sum + Math.max(0, x.qty) : sum), 0);
 }
 
-function modelNorm(value: string | null | undefined): string {
-  return String(value || '')
-    .toLowerCase()
-    .replace(/\s+tokens?$/i, '')
-    .replace(/^(openai|anthropic|google|deepseek|z-ai|moonshotai|x-ai|meta-llama|mistralai)\//, '')
-    .replace(/[^a-z0-9]+/g, '');
-}
-
 function modelTail(value: string | null | undefined): string {
   const text = String(value || '');
   return text.includes('/') ? text.split('/').pop() || text : text;
 }
 
+function modelParts(value: string | null | undefined): string[] {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/\s+tokens?$/i, '')
+    .replace(/^(openai|anthropic|google|deepseek|z-ai|moonshotai|x-ai|meta-llama|mistralai)\//, '')
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+}
+
+function versionOnlySuffix(parts: string[]): boolean {
+  if (!parts.length) return false;
+  if (parts.length === 1 && /^\d{6,}$/.test(parts[0])) return true;
+  return parts.length === 3 && /^\d{4}$/.test(parts[0]) && /^\d{1,2}$/.test(parts[1]) && /^\d{1,2}$/.test(parts[2]);
+}
+
 function itemMatchesModel(itemName: string, model: string | null): boolean {
-  const left = modelNorm(itemName.replace(/\s+Tokens$/i, ''));
-  const right = modelNorm(modelTail(model));
-  return Boolean(left && right && (left === right || left.includes(right) || right.includes(left)));
+  const left = modelParts(itemName.replace(/\s+Tokens$/i, ''));
+  const right = modelParts(modelTail(model));
+  if (!left.length || !right.length) return false;
+  if (left.join(':') === right.join(':')) return true;
+  const short = left.length < right.length ? left : right;
+  const long = left.length < right.length ? right : left;
+  if (!short.every((part, index) => long[index] === part)) return false;
+  return versionOnlySuffix(long.slice(short.length));
 }
 
 function classifyWindow(
@@ -377,7 +405,7 @@ function classifyWindow(
     .filter(([name, x]) => /Tokens$/i.test(name) && x.qty > 0)
     .map(([name]) => name);
   const byokNames = Object.entries(byok)
-    .filter(([, x]) => x.input || x.output || x.cacheRead || x.cacheCreate)
+    .filter(([, x]) => x.input > 0 || x.output > 0 || x.cacheRead > 0 || x.cacheCreate > 0)
     .map(([name]) => name);
   const mainModelSeen = tokenNames.some(name => itemMatchesModel(name, snap.model)) || byokNames.some(name => itemMatchesModel(name, snap.model));
   const otherModelSeen = tokenNames.some(name => !itemMatchesModel(name, snap.model)) || byokNames.some(name => !itemMatchesModel(name, snap.model));
@@ -408,32 +436,104 @@ function classifyWindow(
   return { kind, confidence, rationale, mainChanged };
 }
 
+function takePendingSse(state: ObserveReducerState): PendingSseSummary {
+  const pending = state.pendingSse;
+  state.pendingSse = emptyPendingSse();
+  return pending;
+}
+
+function addSplit(split: AttributionSplit, row: ObserveLedgerWindow): void {
+  split.tokens[row.attribution] += row.tokenDelta;
+  split.events[row.attribution] += row.eventCount;
+  split.windows[row.attribution] += 1;
+}
+
+function appendLedger(state: ObserveReducerState, row: ObserveLedgerWindow): ObserveLedgerWindow {
+  state.ledger.push(row);
+  if (state.open) addSplit(state.open.split, row);
+  if (state.ledger.length > MAX_OBSERVE_LEDGER) state.ledger.splice(0, state.ledger.length - MAX_OBSERVE_LEDGER);
+  return row;
+}
+
+function missingBreakdownWindow(
+  state: ObserveReducerState,
+  prev: ObserveSnapshot,
+  snap: ObserveSnapshot,
+  events: PendingSseSummary,
+  accountingCostDeltaUsd: number,
+): ObserveLedgerWindow | null {
+  if (!events.count && accountingCostDeltaUsd <= 0) return null;
+  const live = liveCapture(snap);
+  const mainChanged = Boolean(live.split && captureKey(liveCapture(prev).split) !== captureKey(live.split));
+  return appendLedger(state, {
+    seq: ++state.ledgerSeq,
+    t: snap.t,
+    from: prev.t,
+    source: events.count ? 'sse' : 'poll',
+    eventCount: events.count,
+    eventSeqFirst: events.firstSeq,
+    eventSeqLast: events.lastSeq,
+    sseCostUsd: events.costUsd,
+    accountingCostDeltaUsd,
+    model: snap.model,
+    modelDeltas: {},
+    byokDeltas: {},
+    tokenDelta: 0,
+    mainCapture: mainChanged && live.split ? { ...live.split, source: live.source } : null,
+    attribution: 'unknown',
+    confidence: 'low',
+    rationale: 'usage breakdown missing for this accounting window',
+  });
+}
+
 function reduceAccountingWindow(state: ObserveReducerState, snap: ObserveSnapshot): ObserveLedgerWindow | null {
   const prev = state.accountingPrev;
   if (!prev) {
     state.accountingPrev = snap;
-    return null;
-  }
-  const events = state.pendingSse.splice(0);
-  const modelDeltas = itemDelta(prev.items, snap.items);
-  const byokDeltas = byokDelta(prev.byok, snap.byok);
-  const accountingCostDeltaUsd = Math.max(0, snap.cost - prev.cost);
-  if (!events.length && !Object.keys(modelDeltas).length && !Object.keys(byokDeltas).length && accountingCostDeltaUsd <= 0) {
-    state.accountingPrev = snap;
+    state.breakdownGap = snap.items === null || snap.byok === null;
     return null;
   }
 
-  const attr = classifyWindow(prev, snap, modelDeltas, byokDeltas, events.length);
+  const events = takePendingSse(state);
+  const accountingCostDeltaUsd = Math.max(0, snap.cost - prev.cost);
+  const hasBreakdown = snap.items !== null && snap.byok !== null;
+  const hadBreakdown = prev.items !== null && prev.byok !== null;
+
+  if (!hasBreakdown) {
+    const row = missingBreakdownWindow(state, prev, snap, events, accountingCostDeltaUsd);
+    state.accountingPrev = { ...snap, items: prev.items, byok: prev.byok };
+    state.breakdownGap = true;
+    return row;
+  }
+
+  const modelDeltas = hadBreakdown ? itemDelta(prev.items, snap.items) : {};
+  const byokDeltas = hadBreakdown ? byokDelta(prev.byok, snap.byok) : {};
+  const hasDelta = Object.keys(modelDeltas).length > 0 || Object.keys(byokDeltas).length > 0;
+  if (!events.count && !hasDelta && accountingCostDeltaUsd <= 0) {
+    state.accountingPrev = snap;
+    if (hadBreakdown) state.breakdownGap = false;
+    return null;
+  }
+
   const live = liveCapture(snap);
-  const row: ObserveLedgerWindow = {
+  const attr = state.breakdownGap || !hadBreakdown
+    ? {
+        kind: 'unknown' as const,
+        confidence: 'low' as const,
+        rationale: 'usage breakdown resumed after a gap; cumulative token delta spans an unobserved interval',
+        mainChanged: Boolean(live.split && captureKey(liveCapture(prev).split) !== captureKey(live.split)),
+      }
+    : classifyWindow(prev, snap, modelDeltas, byokDeltas, events.count);
+
+  const row = appendLedger(state, {
     seq: ++state.ledgerSeq,
     t: snap.t,
     from: prev.t,
-    source: events.length ? 'sse' : 'poll',
-    eventCount: events.length,
-    eventSeqFirst: events[0]?.seq ?? null,
-    eventSeqLast: events.at(-1)?.seq ?? null,
-    sseCostUsd: events.reduce((sum, event) => sum + event.costDeltaUsd, 0),
+    source: events.count ? 'sse' : 'poll',
+    eventCount: events.count,
+    eventSeqFirst: events.firstSeq,
+    eventSeqLast: events.lastSeq,
+    sseCostUsd: events.costUsd,
     accountingCostDeltaUsd,
     model: snap.model,
     modelDeltas,
@@ -443,10 +543,9 @@ function reduceAccountingWindow(state: ObserveReducerState, snap: ObserveSnapsho
     attribution: attr.kind,
     confidence: attr.confidence,
     rationale: attr.rationale,
-  };
-  state.ledger.push(row);
-  if (state.ledger.length > MAX_OBSERVE_LEDGER) state.ledger.splice(0, state.ledger.length - MAX_OBSERVE_LEDGER);
+  });
   state.accountingPrev = snap;
+  state.breakdownGap = false;
   return row;
 }
 
@@ -478,24 +577,12 @@ function recordMainCapture(state: ObserveReducerState, snap: ObserveSnapshot): v
   }
 }
 
-function splitForRun(state: ObserveReducerState, startSeq: number): AttributionSplit {
-  const out: AttributionSplit = {
-    tokens: { main: 0, subagent: 0, mixed: 0, unknown: 0 },
-    events: { main: 0, subagent: 0, mixed: 0, unknown: 0 },
-    windows: { main: 0, subagent: 0, mixed: 0, unknown: 0 },
-  };
-  for (const row of state.ledger) {
-    if (row.seq < startSeq) continue;
-    out.tokens[row.attribution] += row.tokenDelta;
-    out.events[row.attribution] += row.eventCount;
-    out.windows[row.attribution] += 1;
-  }
-  return out;
-}
-
 function closeTurn(state: ObserveReducerState, snap: ObserveSnapshot): ObserveRow {
   const open = state.open as OpenRun;
-  const metered = meteredDelta(open.start.items, snap.items);
+  const accountingEnd = state.accountingPrev;
+  const endItems = snap.items ?? accountingEnd?.items ?? null;
+  const endByok = snap.byok ?? accountingEnd?.byok ?? null;
+  const metered = meteredDelta(open.start.items, endItems);
   const burn = Object.entries(metered).reduce((sum, [name, qty]) => (/Tokens$/.test(name) ? sum + qty : sum), 0);
   const endedAt = snap.completeAt >= open.startedAt ? snap.completeAt : snap.t;
   const row: ObserveRow = {
@@ -509,12 +596,12 @@ function closeTurn(state: ObserveReducerState, snap: ObserveSnapshot): ObserveRo
     source: open.source,
     metered,
     burn,
-    byok: byokDelta(open.start.byok, snap.byok),
+    byok: byokDelta(open.start.byok, endByok),
     calls: open.caps.length,
     sampled: sumCaptures(open.caps),
     costDelta: Math.max(0, snap.cost - open.start.cost),
     phaseAtClose: snap.phase.k,
-    split: splitForRun(state, open.ledgerStartSeq),
+    split: open.split,
   };
   state.turns.unshift(row);
   if (state.turns.length > MAX_OBSERVE_TURNS) state.turns.length = MAX_OBSERVE_TURNS;
@@ -537,7 +624,7 @@ export function applyObserveSnapshot(state: ObserveReducerState, snap: ObserveSn
       caps: [],
       lastMainCaptureKey: baseline === snap ? null : captureKey(liveCapture(baseline).split),
       source: snap.phase.source,
-      ledgerStartSeq: state.ledgerSeq + 1,
+      split: emptyAttributionSplit(),
     };
   } else if (completedOffscreenCycle(state, snap) && state.latest) {
     state.open = {
@@ -546,7 +633,7 @@ export function applyObserveSnapshot(state: ObserveReducerState, snap: ObserveSn
       caps: [],
       lastMainCaptureKey: captureKey(liveCapture(state.latest).split),
       source: snap.phase.source,
-      ledgerStartSeq: state.ledgerSeq + 1,
+      split: emptyAttributionSplit(),
     };
   }
 
@@ -568,7 +655,10 @@ export function handleSseData(state: ObserveReducerState, data: string): 'refres
   }
   if (parsed.type !== 'cost-updated') return 'ignore';
   const seq = ++state.streamEvents;
-  state.pendingSse.push({ seq, t: Date.now(), costDeltaUsd: typeof parsed.costDeltaUsd === 'number' ? parsed.costDeltaUsd : 0 });
+  state.pendingSse.count += 1;
+  if (state.pendingSse.firstSeq === null) state.pendingSse.firstSeq = seq;
+  state.pendingSse.lastSeq = seq;
+  state.pendingSse.costUsd += typeof parsed.costDeltaUsd === 'number' ? parsed.costDeltaUsd : 0;
   return 'refresh';
 }
 
@@ -650,6 +740,7 @@ export interface HyperagentObserveResult {
   latest: ObserveSnapshot | null;
   billing: BillingRateCard | null;
   billingError: string | null;
+  billingReady: boolean;
   streamEvents: number;
   streamUp: boolean | null;
   fetches: ObserveFetchCall[];
@@ -673,6 +764,7 @@ export async function runHyperagentObservePass(options: {
   openEventSource?: ObserveSseFactory;
   now?: () => number;
   fetchTimeoutMs?: number;
+  billingTimeoutMs?: number;
 }): Promise<HyperagentObserveResult> {
   const origin = options.origin.replace(/\/$/, '');
   const pathname = options.pathname || '/';
@@ -689,6 +781,7 @@ export async function runHyperagentObservePass(options: {
     latest: null,
     billing: null,
     billingError: null,
+    billingReady: false,
     streamEvents: 0,
     streamUp: null,
     fetches,
@@ -708,26 +801,29 @@ export async function runHyperagentObservePass(options: {
 
   const state = emptyObserveState(threadId);
   const fetchTimeoutMs = options.fetchTimeoutMs ?? OBSERVE_FETCH_TIMEOUT_MS;
-  const withTimeout = async <T>(promise: Promise<T>, label: string): Promise<T> => {
+  const billingTimeoutMs = options.billingTimeoutMs ?? OBSERVE_BILLING_TIMEOUT_MS;
+  const withTimeout = async <T>(promise: Promise<T>, label: string, timeoutMs = fetchTimeoutMs): Promise<T> => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
         promise,
-        new Promise<T>((_resolve, reject) => { timer = setTimeout(() => reject(new Error(`${label} timed out after ${fetchTimeoutMs}ms`)), fetchTimeoutMs); }),
+        new Promise<T>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+        }),
       ]);
     } finally {
       if (timer) clearTimeout(timer);
     }
   };
-  const get = async (path: string): Promise<unknown> => {
+  const get = async (path: string, timeoutMs = fetchTimeoutMs): Promise<unknown> => {
     const url = `${origin}${path}`;
     fetches.push({ url, method: 'GET' });
-    const response = await withTimeout(options.fetchImpl(url, { method: 'GET', headers: { accept: 'application/json' } }), `GET ${path}`);
-    return withTimeout(readJson(response, path), `GET ${path} body`);
+    const response = await withTimeout(options.fetchImpl(url, { method: 'GET', headers: { accept: 'application/json' } }), `GET ${path}`, timeoutMs);
+    return withTimeout(readJson(response, path), `GET ${path} body`, timeoutMs);
   };
-  const getOptional = async (path: string): Promise<{ value: unknown | null; error: string | null }> => {
+  const getOptional = async (path: string, timeoutMs: number): Promise<{ value: unknown | null; error: string | null }> => {
     try {
-      return { value: await get(path), error: null };
+      return { value: await get(path, timeoutMs), error: null };
     } catch (error) {
       return { value: null, error: String(error instanceof Error ? error.message : error) };
     }
@@ -747,7 +843,8 @@ export async function runHyperagentObservePass(options: {
 
   try {
     await cycle();
-    const billing = await getOptional('/api/settings/billing/usage');
+    const billing = await getOptional('/api/settings/billing/usage', billingTimeoutMs);
+    result.billingReady = true;
     if (billing.value) result.billing = normalizeBillingUsage(billing.value, now());
     else result.billingError = billing.error;
   } catch (error) {
