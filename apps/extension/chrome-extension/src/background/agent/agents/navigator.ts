@@ -29,6 +29,8 @@ import { HistoryTreeProcessor } from '@src/background/browser/dom/history/servic
 import { AgentStepRecord } from '../history';
 import { type DOMHistoryElement } from '@src/background/browser/dom/history/view';
 import { isUserscriptOnlyAction } from '../actions/schemas';
+import type { NavigatorControlSignal } from '../routing';
+import { deriveNavigatorControl, truncateActionsForStep } from '../routing';
 
 const logger = createLogger('NavigatorAgent');
 
@@ -71,7 +73,24 @@ export class NavigatorActionRegistry {
 
 export interface NavigatorResult {
   done: boolean;
+  /**
+   * Follower-initiated control signal (ADR-002). Optional so existing callers
+   * that only check `done` keep working; the executor treats any return
+   * signal as the primary router input, with planningInterval as backstop.
+   */
+  control?: NavigatorControlSignal;
+  success?: boolean;
 }
+
+// ADR-002 router policy lives in ../routing (dependency-free for tests);
+// re-exported here so Navigator callers keep a single import site.
+export type { NavigatorControlSignal } from '../routing';
+export {
+  FOLLOWER_RETURN_SIGNALS,
+  deriveNavigatorControl,
+  isFollowerReturnSignal,
+  truncateActionsForStep,
+} from '../routing';
 
 export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
   private actionRegistry: NavigatorActionRegistry;
@@ -215,10 +234,16 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
       // emit event
       this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.STEP_OK, 'Navigation done');
       let done = false;
-      if (actionResults.length > 0 && actionResults[actionResults.length - 1].isDone) {
-        done = true;
+      let success: boolean | undefined;
+      if (actionResults.length > 0) {
+        const last = actionResults[actionResults.length - 1];
+        if (last.isDone) {
+          done = true;
+          success = last.success;
+        }
       }
-      agentOutput.result = { done };
+      const hasError = actionResults.length > 0 && actionResults[actionResults.length - 1].error != null;
+      agentOutput.result = { done, control: deriveNavigatorControl({ done, success, hasError }), success };
       return agentOutput;
     } catch (error) {
       this.removeLastStateMessageFromMemory();
@@ -369,10 +394,22 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
     let errCount = 0;
     logger.info('Actions', actions);
 
+    // Enforce maxActionsPerStep server-side (ADR-002): the prompt hint alone
+    // never limited the model, so truncate here and emit a clear notice event.
+    let effectiveActions = actions;
+    const maxPerStep = this.context.options.maxActionsPerStep;
+    const truncation = truncateActionsForStep(actions, maxPerStep);
+    if (truncation.truncated > 0) {
+      effectiveActions = truncation.actions;
+      const msg = `Truncated actions from ${actions.length} to ${effectiveActions.length} per maxActionsPerStep=${Math.floor(maxPerStep)}`;
+      logger.info(msg);
+      this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);
+    }
+
     const browserContext = this.context.browserContext;
     const isUserscriptOnly =
-      actions.length > 0 &&
-      actions.every(
+      effectiveActions.length > 0 &&
+      effectiveActions.every(
         action =>
           typeof action === 'object' && action !== null && isUserscriptOnlyAction(Object.keys(action)[0]),
       );
@@ -386,7 +423,7 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
       await browserContext.removeHighlight();
     }
 
-    for (const [i, action] of actions.entries()) {
+    for (const [i, action] of effectiveActions.entries()) {
       if (!action || typeof action !== 'object') {
         logger.warning('Skipping non-object action', action);
         continue;
@@ -410,7 +447,7 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
           const newPathHashes = await calcBranchPathHashSet(newState);
           // next action requires index but there are new elements on the page
           if (cachedPathHashes && !newPathHashes.isSubsetOf(cachedPathHashes)) {
-            const msg = `Something new appeared after action ${i} / ${actions.length}`;
+            const msg = `Something new appeared after action ${i} / ${effectiveActions.length}`;
             logger.info(msg);
             results.push(
               new ActionResult({

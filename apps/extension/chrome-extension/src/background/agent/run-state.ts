@@ -31,6 +31,8 @@ export interface QueuedRun {
 export interface RunClock {
   lastEnqueuedAt: number | null;
   turnCompleteAt: number | null;
+  // In-memory only: the run queue is lost on background reload. Persistence
+  // (chrome.storage vs indexedDB, replay semantics) is deferred per ADR-004.
   pendingQueue: QueuedRun[];
   runningTurnSource: RunTurnSource | null;
   runningTurnId: string | null;
