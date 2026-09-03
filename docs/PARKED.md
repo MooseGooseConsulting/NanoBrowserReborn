@@ -5,7 +5,7 @@ Each item has the gate that unparks it. Nothing here is deleted.
 | Item | Gate to start |
 |---|---|
 | Outside message bus / external supervision ("Exterior Dispatcher") | Core drives real sidebar tasks end to end; then define the inbound envelope (task id, objective, acceptance, cost cap) |
-| Stagehand Node host (second kitchen) | Real CDP 5-step passes once (connect, observe, one `act`, teardown leaving Chrome running) |
+| Stagehand Node host (standalone batch prototype only) | Real CDP 5-step passed; permanently excluded from extension path per ADR-003 to preserve stealth (zero debugger banners, no Node daemon). Parked indefinitely unless headless batch extraction outside Chrome is requested. |
 | Durable checkpoints beyond SQLite + persisted trace | LangGraph rebase lands with parity tests |
 | Portable config file + secret-store wiring (Doppler → OpenBao/keychain) | Sidebar + executor restore complete (ADR-001) |
 | Oracle #13 playbook lifts (bundling, thinking selectors, project-sources sync, image downloader) | Core works; each lift lands as a versioned site adapter, not a core change |

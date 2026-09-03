@@ -6,7 +6,7 @@ Userscripts are **reviewed payloads** the harness injects, runs, and rewrites. O
 
 This file records landed work and active work order. Target architecture and decision authority live in `docs/adr/` (ADR-001 through ADR-004) and deferred gates live in `docs/PARKED.md`.
 
-Set-of-marks is **optional**. Do not rebuild `buildDomTree` / `highlightIndex`. Do not invent a new repo. Spec Kit is not the process. `drop/` is historical. `vendor/` is frozen. Work in `apps/extension` (and later `apps/stagehand-host`).
+Set-of-marks is **optional**. Do not rebuild `buildDomTree` / `highlightIndex`. Do not invent a new repo. Spec Kit is not the process. `drop/` is historical. `vendor/` is frozen. Work in `apps/extension`.
 
 ## Status
 
@@ -18,10 +18,12 @@ Set-of-marks is **optional**. Do not rebuild `buildDomTree` / `highlightIndex`. 
    - **BrowserPort seam**: In-tree port interface with `mv3` adapter and `fake` test port (ADR-003).
    - **Decisions**: ADR-001 through ADR-004 + `docs/PARKED.md`.
 3. **Next up (unparked by gates in `docs/PARKED.md`)**:
+   - In-tree continuous E2E qualification (`turbo e2e` headless Chromium runner).
+   - Wire Executor to `BrowserPort` seam for offline `fake.ts` simulation.
    - Portable config file + secret-store wiring (Doppler → OpenBao/keychain) per ADR-001.
-   - Stagehand Node host ("second kitchen") over CDP behind `BrowserPort` per ADR-003, unblocked by passing the CDP 5-step.
    - Durable checkpoints beyond SQLite + persisted trace.
    - Exterior message bus / external supervision ("Exterior Dispatcher") once core drives real sidebar tasks end to end.
+   *(Note: Stagehand/CDP host is explicitly excluded from the extension roadmap per ADR-003 to preserve stealth and zero-daemon UX).*
 
 ## Gates that stay
 

@@ -86,12 +86,25 @@ export interface RunLogEventInput {
 
 export interface RunLogEntry extends RunLogEventInput {}
 
-/** Append-only run log; returns a new array. Read-only rendering of EXECUTION data. */
+/** Cap so a long chat cannot grow an unbounded render list. */
+export const MAX_RUN_LOG_ENTRIES = 200;
+
+/**
+ * Append-only run log; returns a new array. A `task.start` event starts a
+ * fresh log so the previous task's entries do not linger. Excess entries
+ * are dropped from the front.
+ */
 export function appendRunLogEntry(
   entries: readonly RunLogEntry[],
   event: RunLogEventInput,
+  maxEntries: number = MAX_RUN_LOG_ENTRIES,
 ): RunLogEntry[] {
-  return [...entries, { ...event }];
+  const base = event.state === 'task.start' ? [] : entries;
+  const next = [...base, { ...event }];
+  if (next.length <= maxEntries) {
+    return next;
+  }
+  return next.slice(-maxEntries);
 }
 
 /** Control-handoff transitions (task lifecycle + run clock) vs step/act progress. */
@@ -112,4 +125,39 @@ export function findLastUserTask(messages: readonly ChatMessageInput[]): string 
     }
   }
   return null;
+}
+
+/**
+ * Payload actually sent to the executor vs the display string shown in chat.
+ * Attachments put file contents in `payload` and filenames in `display`.
+ */
+export interface SubmittedTask {
+  payload: string;
+  display: string;
+}
+
+export function rememberSubmittedTask(payload: string, display?: string): SubmittedTask {
+  return { payload, display: display ?? payload };
+}
+
+/** Prefer the original executor payload so retry keeps attached file contents. */
+export function resolveRetryTask(
+  lastSubmitted: SubmittedTask | null,
+  messages: readonly ChatMessageInput[],
+): string | null {
+  if (lastSubmitted?.payload.trim()) {
+    return lastSubmitted.payload;
+  }
+  return findLastUserTask(messages);
+}
+
+/** Pause/Resume handlers that every ChatInput instance (empty + active) must receive. */
+export function getChatPauseProps<T extends { onPauseTask: unknown; onResumeTask: unknown; isPaused: unknown }>(
+  props: T,
+): Pick<T, 'onPauseTask' | 'onResumeTask' | 'isPaused'> {
+  return {
+    onPauseTask: props.onPauseTask,
+    onResumeTask: props.onResumeTask,
+    isPaused: props.isPaused,
+  };
 }
