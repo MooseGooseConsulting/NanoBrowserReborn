@@ -3,6 +3,7 @@ import {
   applyObserveSnapshot,
   emptyObserveState,
   handleSseData,
+  MAX_OBSERVE_LEDGER,
   normalizeBillingUsage,
   type ObserveSnapshot,
   type TokenSplit,
@@ -24,15 +25,17 @@ function phase(running = true): ObserveSnapshot['phase'] {
 function snap(options: {
   t: number;
   running?: boolean;
+  model?: string;
   capture?: TokenSplit | null;
   indicator?: TokenSplit | null;
   cost?: number;
-  items?: Record<string, { qty: number; cost: number }>;
+  items?: Record<string, { qty: number; cost: number }> | null;
+  byok?: Record<string, TokenSplit> | null;
 }): ObserveSnapshot {
   const running = options.running ?? true;
   return {
     t: options.t,
-    model: MODEL,
+    model: options.model ?? MODEL,
     messages: 10,
     phase: phase(running),
     running,
@@ -41,8 +44,8 @@ function snap(options: {
     capture: options.capture ?? null,
     indicator: options.indicator ?? null,
     cost: options.cost ?? 0,
-    items: options.items ?? {},
-    byok: {},
+    items: options.items === undefined ? {} : options.items,
+    byok: options.byok === undefined ? {} : options.byok,
   };
 }
 
@@ -190,6 +193,111 @@ describe('hyperagent observe v6 accounting ledger', () => {
       confidence: 'medium',
     });
     expect(state.ledger[0].sseCostUsd).toBeCloseTo(0.03);
+  });
+
+  it('retains SSE evidence received before the first complete accounting baseline', () => {
+    const state = emptyObserveState(THREAD_ID);
+    handleSseData(state, JSON.stringify({ type: 'cost-updated', costDeltaUsd: 0.02 }));
+
+    applyObserveSnapshot(
+      state,
+      snap({
+        t: 1,
+        capture: CAPTURE_A,
+        items: { 'deepseek-v4-flash Tokens': { qty: 100, cost: 0.01 } },
+      }),
+    );
+    expect(state.pendingSse.count).toBe(1);
+
+    applyObserveSnapshot(
+      state,
+      snap({
+        t: 2,
+        capture: CAPTURE_A,
+        cost: 0.01,
+        items: { 'deepseek-v4-flash Tokens': { qty: 100, cost: 0.01 } },
+      }),
+    );
+    expect(state.ledger[0]).toMatchObject({ eventCount: 1, sseCostUsd: 0.02 });
+    expect(state.pendingSse.count).toBe(0);
+  });
+
+  it('does not collapse related model family names such as gpt-5 and gpt-5-mini', () => {
+    const state = emptyObserveState(THREAD_ID);
+    const model = 'openai/gpt-5';
+    applyObserveSnapshot(
+      state,
+      snap({
+        t: 1,
+        model,
+        capture: CAPTURE_A,
+        items: {
+          'gpt-5 Tokens': { qty: 100, cost: 0.01 },
+          'gpt-5-mini Tokens': { qty: 0, cost: 0 },
+        },
+      }),
+    );
+
+    handleSseData(state, JSON.stringify({ type: 'cost-updated', costDeltaUsd: 0.01 }));
+    applyObserveSnapshot(
+      state,
+      snap({
+        t: 2,
+        model,
+        capture: CAPTURE_A,
+        items: {
+          'gpt-5 Tokens': { qty: 100, cost: 0.01 },
+          'gpt-5-mini Tokens': { qty: 100, cost: 0.01 },
+        },
+      }),
+    );
+
+    expect(state.ledger[0]).toMatchObject({ attribution: 'subagent', confidence: 'high', tokenDelta: 100 });
+  });
+
+  it('does not treat regressing BYOK counters as model activity evidence', () => {
+    const state = emptyObserveState(THREAD_ID);
+    const byokA = { input: 100, output: 10, cacheRead: 0, cacheCreate: 0 };
+    const byokB = { input: 50, output: 5, cacheRead: 0, cacheCreate: 0 };
+    applyObserveSnapshot(state, snap({ t: 1, capture: CAPTURE_A, byok: { 'openai/gpt-5': byokA } }));
+    handleSseData(state, JSON.stringify({ type: 'cost-updated', costDeltaUsd: 0 }));
+    applyObserveSnapshot(state, snap({ t: 2, capture: CAPTURE_A, byok: { 'openai/gpt-5': byokB } }));
+
+    expect(state.ledger[0]).toMatchObject({ attribution: 'unknown', confidence: 'low', tokenDelta: 0 });
+  });
+
+  it('keeps run split totals complete even after the visible ledger is pruned', () => {
+    const state = emptyObserveState(THREAD_ID);
+    applyObserveSnapshot(
+      state,
+      snap({ t: 0, capture: { input: 1, output: 0, cacheRead: 0, cacheCreate: 0 }, items: { 'deepseek-v4-flash Tokens': { qty: 0, cost: 0 } } }),
+    );
+
+    for (let i = 1; i <= MAX_OBSERVE_LEDGER + 1; i += 1) {
+      handleSseData(state, JSON.stringify({ type: 'cost-updated', costDeltaUsd: 0 }));
+      applyObserveSnapshot(
+        state,
+        snap({
+          t: i,
+          capture: { input: i + 1, output: 0, cacheRead: 0, cacheCreate: 0 },
+          items: { 'deepseek-v4-flash Tokens': { qty: i, cost: 0 } },
+        }),
+      );
+    }
+
+    const closed = applyObserveSnapshot(
+      state,
+      snap({
+        t: MAX_OBSERVE_LEDGER + 2,
+        running: false,
+        capture: { input: MAX_OBSERVE_LEDGER + 2, output: 0, cacheRead: 0, cacheCreate: 0 },
+        items: { 'deepseek-v4-flash Tokens': { qty: MAX_OBSERVE_LEDGER + 1, cost: 0 } },
+      }),
+    );
+
+    expect(state.ledger).toHaveLength(MAX_OBSERVE_LEDGER);
+    expect(closed?.split?.tokens.main).toBe(MAX_OBSERVE_LEDGER + 1);
+    expect(closed?.split?.events.main).toBe(MAX_OBSERVE_LEDGER + 1);
   });
 
   it('derives exact Orb token rates when quantity and total are available and keeps pass-through lines distinct', () => {
