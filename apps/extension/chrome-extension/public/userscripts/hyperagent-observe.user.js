@@ -174,8 +174,8 @@
 
   function reduceAccounting(snap) {
     const prev = state.accountingPrev;
-    const events = state.pendingSse.splice(0);
     if (!prev) { state.accountingPrev = snap; return null; }
+    const events = state.pendingSse.splice(0);
     const modelDeltas = itemDelta(prev.items, snap.items);
     const byokDeltas = byokDelta(prev.byok, snap.byok);
     const costDelta = Math.max(0, (snap.cost || 0) - (prev.cost || 0));
@@ -484,8 +484,8 @@
     globalThis.__nanoHyperagentObserve = result;
     paint('Nano Reborn Hyperagent observe v6.1: establishing accounting baseline…');
 
-    const gen = generation;
-    void refresh().then(() => { if (!stopped && generation === gen && threadId === id) openStream(); });
+    openStream();
+    requestRefresh();
   }
 
   let lastPath = location.pathname;
