@@ -44,12 +44,12 @@ const ROUTE_TARGETS = {
 /**
  * Thin StateGraph rebase of the Leader/Follower loop.
  *
- * Topology: START -> (entry router) -> leader -> follower -> tools -+
- *   leader -
-
-→ END on completion/halt ──────────────┘
- *                ^                          |
- *                +---- router edge ----------+
+ * Topology:
+ *   START -> [router] -> leader -> follower -> tools -+
+ *                    ^                                |
+ *                    +----------- [router] <----------+
+ *                    |
+ *                    +--> END (completion / halt)
  * driven by the follower control signal (primary), planningInterval
  * backstop cadence, and the maxSteps valve (ADR-002).
  *

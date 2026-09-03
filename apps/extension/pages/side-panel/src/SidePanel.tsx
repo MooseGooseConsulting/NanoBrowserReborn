@@ -852,8 +852,10 @@ const SidePanel = () => {
   const handlePauseTask = useCallback(() => {
     try {
       portRef.current?.postMessage(getPauseTaskMessage());
-      // Optimistic: TASK_PAUSE confirms it (background emits it when the
-      // turn yields); reset on TASK_OK/FAIL/CANCEL/START above.
+      // Optimistic: the flag is the source of truth. TASK_PAUSE is a
+      // best-effort confirmation (background emits it when a turn yields
+      // while paused; mid-step pauses spin-wait instead). Reset on
+      // TASK_OK/FAIL/CANCEL/START above.
       setIsPaused(true);
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);

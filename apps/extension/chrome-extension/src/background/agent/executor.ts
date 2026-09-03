@@ -583,7 +583,11 @@ export class Executor {
   }
 
   async resume(): Promise<void> {
+    if (!this.context.paused) {
+      return;
+    }
     this.context.resume();
+    await this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_RESUME, t('exec_task_resume'));
     const snapshot = this.context.runSession.snapshot();
     if (shouldResumeDrainLoop(snapshot, this.executeLoop !== null)) {
       void this.execute();
