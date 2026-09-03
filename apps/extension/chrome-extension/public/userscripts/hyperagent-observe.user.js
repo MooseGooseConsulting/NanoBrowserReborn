@@ -1,25 +1,26 @@
 (() => {
   /**
-   * Reviewed Hyperagent OBSERVE payload v6.1.
+   * Reviewed Hyperagent OBSERVE payload v6.2.
    * Same-origin GET + SSE. Zero DOM scrape. No Hyperagent writes.
    *
-   * v6.1 adds:
-   * - main-capture dedupe (lastCapture primary, indicator fallback)
-   * - exact cumulative accounting windows per forced SSE refresh
+   * - cumulative accounting windows, never fabricated per-call rows
    * - main/subagent/mixed/unknown attribution with confidence
-   * - run-level attribution splits
-   * - best-effort Orb billing rate-card read
+   * - lastCapture primary; lastContextIndicator fallback only
+   * - constant-size SSE completion accumulator
+   * - run-level attribution aggregates independent of ledger retention
+   * - best-effort Orb billing card with navigation-safe refreshes
    */
   const ALLOWED_HOSTS = { 'hyperagent.com': true, 'www.hyperagent.com': true };
   const STOP_KEY = '__nanoHyperagentObserveStop';
   const RUN_MS = 2000;
   const IDLE_MS = 10000;
   const BILLING_MS = 5 * 60 * 1000;
+  const FETCH_TIMEOUT_MS = 15000;
+  const BILLING_TIMEOUT_MS = 2500;
   const MAX_TURNS = 300;
   const MAX_CAPTURES = 5000;
   const MAX_LEDGER = 2500;
   const MAX_FETCHES = 40;
-  const FETCH_TIMEOUT_MS = 15000;
   const ZERO = { input: 0, output: 0, cacheRead: 0, cacheCreate: 0 };
 
   if (typeof globalThis[STOP_KEY] === 'function') {
@@ -39,6 +40,8 @@
     latest: null,
     billing: null,
     billingError: null,
+    billingReady: false,
+    billingPending: false,
     streamEvents: 0,
     streamUp: null,
     fetches: [],
@@ -69,6 +72,14 @@
   function captureKey(c) { return c ? c.input + '/' + c.output + '/' + c.cacheRead + '/' + c.cacheCreate : null; }
   function liveCapture(snap) { return snap.capture ? { split: snap.capture, source: 'capture' } : { split: snap.indicator, source: 'indicator' }; }
   function contextOf(c) { return c ? c.input + c.cacheRead : 0; }
+  function emptyPendingSse() { return { count: 0, firstSeq: null, lastSeq: null, costUsd: 0 }; }
+  function emptySplit() {
+    return {
+      tokens: { main: 0, subagent: 0, mixed: 0, unknown: 0 },
+      events: { main: 0, subagent: 0, mixed: 0, unknown: 0 },
+      windows: { main: 0, subagent: 0, mixed: 0, unknown: 0 },
+    };
+  }
 
   function classify(status, thread) {
     const enqueuedAt = parseEpoch(status.lastEnqueuedAt);
@@ -84,9 +95,10 @@
   }
 
   function readBreakdown(breakdown) {
+    if (!breakdown || typeof breakdown !== 'object') return { items: null, byok: null };
     const items = {}, byok = {};
-    (breakdown && breakdown.items ? breakdown.items : []).forEach(item => { items[item.name] = { qty: item.quantity || 0, cost: item.costUsd || 0 }; });
-    (breakdown && breakdown.byokTokenUsage ? breakdown.byokTokenUsage : []).forEach(model => {
+    (Array.isArray(breakdown.items) ? breakdown.items : []).forEach(item => { items[item.name] = { qty: item.quantity || 0, cost: item.costUsd || 0 }; });
+    (Array.isArray(breakdown.byokTokenUsage) ? breakdown.byokTokenUsage : []).forEach(model => {
       byok[model.model] = {
         input: model.inputTokens || 0,
         output: model.outputTokens || 0,
@@ -101,7 +113,7 @@
     return {
       threadId: id,
       turns: [], captures: [], ledger: [], ledgerSeq: 0,
-      accountingPrev: null, pendingSse: [], lastMainCaptureKey: null,
+      accountingPrev: null, breakdownGap: false, pendingSse: emptyPendingSse(), lastMainCaptureKey: null,
       open: null, latest: null, streamEvents: 0, streamUp: null, err: null,
     };
   }
@@ -141,22 +153,37 @@
     });
     return total;
   }
-  function modelNorm(value) {
-    return String(value || '').toLowerCase().replace(/\s+tokens?$/i, '')
-      .replace(/^(openai|anthropic|google|deepseek|z-ai|moonshotai|x-ai|meta-llama|mistralai)\//, '')
-      .replace(/[^a-z0-9]+/g, '');
-  }
+
   function modelTail(value) { const x = String(value || ''); return x.indexOf('/') >= 0 ? x.split('/').pop() : x; }
+  function modelParts(value) {
+    return String(value || '').toLowerCase()
+      .replace(/\s+tokens?$/i, '')
+      .replace(/^(openai|anthropic|google|deepseek|z-ai|moonshotai|x-ai|meta-llama|mistralai)\//, '')
+      .split(/[^a-z0-9]+/).filter(Boolean);
+  }
+  function versionOnlySuffix(parts) {
+    if (!parts.length) return false;
+    if (parts.length === 1 && /^\d{6,}$/.test(parts[0])) return true;
+    return parts.length === 3 && /^\d{4}$/.test(parts[0]) && /^\d{1,2}$/.test(parts[1]) && /^\d{1,2}$/.test(parts[2]);
+  }
   function itemMatchesModel(name, model) {
-    const a = modelNorm(String(name || '').replace(/\s+Tokens$/i, '')), b = modelNorm(modelTail(model));
-    return Boolean(a && b && (a === b || a.indexOf(b) >= 0 || b.indexOf(a) >= 0));
+    const a = modelParts(String(name || '').replace(/\s+Tokens$/i, ''));
+    const b = modelParts(modelTail(model));
+    if (!a.length || !b.length) return false;
+    if (a.join(':') === b.join(':')) return true;
+    const short = a.length < b.length ? a : b, long = a.length < b.length ? b : a;
+    if (!short.every((part, i) => long[i] === part)) return false;
+    return versionOnlySuffix(long.slice(short.length));
   }
 
   function classifyWindow(prev, snap, items, byok, eventCount) {
     const oldCap = liveCapture(prev).split, newCap = liveCapture(snap).split;
     const mainChanged = Boolean(newCap && captureKey(oldCap) !== captureKey(newCap));
     const tokenNames = Object.keys(items || {}).filter(n => /Tokens$/i.test(n) && (items[n].qty || 0) > 0);
-    const byokNames = Object.keys(byok || {}).filter(m => { const d = byok[m]; return d.input || d.output || d.cacheRead || d.cacheCreate; });
+    const byokNames = Object.keys(byok || {}).filter(m => {
+      const d = byok[m];
+      return d.input > 0 || d.output > 0 || d.cacheRead > 0 || d.cacheCreate > 0;
+    });
     const mainModelSeen = tokenNames.some(n => itemMatchesModel(n, snap.model)) || byokNames.some(n => itemMatchesModel(n, snap.model));
     const otherModelSeen = tokenNames.some(n => !itemMatchesModel(n, snap.model)) || byokNames.some(n => !itemMatchesModel(n, snap.model));
     let kind = 'unknown', rationale = 'no attributable model/capture delta';
@@ -172,36 +199,90 @@
     return { kind, confidence, rationale, mainChanged };
   }
 
+  function takePendingSse() {
+    const pending = state.pendingSse;
+    state.pendingSse = emptyPendingSse();
+    return pending;
+  }
+  function addSplit(split, row) {
+    const k = Object.prototype.hasOwnProperty.call(split.tokens, row.attribution) ? row.attribution : 'unknown';
+    split.tokens[k] += row.tokenDelta || 0;
+    split.events[k] += row.eventCount || 0;
+    split.windows[k] += 1;
+  }
+  function appendLedger(row) {
+    state.ledger.push(row);
+    if (state.open) addSplit(state.open.split, row);
+    if (state.ledger.length > MAX_LEDGER) state.ledger.splice(0, state.ledger.length - MAX_LEDGER);
+    return row;
+  }
+
   function reduceAccounting(snap) {
     const prev = state.accountingPrev;
-    if (!prev) { state.accountingPrev = snap; return null; }
-    const events = state.pendingSse.splice(0);
-    const modelDeltas = itemDelta(prev.items, snap.items);
-    const byokDeltas = byokDelta(prev.byok, snap.byok);
-    const costDelta = Math.max(0, (snap.cost || 0) - (prev.cost || 0));
-    if (!events.length && !Object.keys(modelDeltas).length && !Object.keys(byokDeltas).length && !costDelta) {
-      state.accountingPrev = snap; return null;
+    if (!prev) {
+      state.accountingPrev = snap;
+      state.breakdownGap = snap.items === null || snap.byok === null;
+      return null;
     }
-    const attr = classifyWindow(prev, snap, modelDeltas, byokDeltas, events.length);
+
+    const events = takePendingSse();
+    const costDelta = Math.max(0, (snap.cost || 0) - (prev.cost || 0));
+    const hasBreakdown = snap.items !== null && snap.byok !== null;
+    const hadBreakdown = prev.items !== null && prev.byok !== null;
+    let modelDeltas = {}, byokDeltas = {};
+    if (hasBreakdown && hadBreakdown) {
+      modelDeltas = itemDelta(prev.items, snap.items);
+      byokDeltas = byokDelta(prev.byok, snap.byok);
+    }
+    const hasDelta = Object.keys(modelDeltas).length || Object.keys(byokDeltas).length;
+
+    if (!hasBreakdown) {
+      if (events.count || costDelta) {
+        const oldCap = liveCapture(prev).split, newCap = liveCapture(snap).split;
+        const mainChanged = Boolean(newCap && captureKey(oldCap) !== captureKey(newCap));
+        appendLedger({
+          seq: ++state.ledgerSeq, t: snap.t, from: prev.t, source: events.count ? 'sse' : 'poll',
+          eventCount: events.count, eventSeqFirst: events.firstSeq, eventSeqLast: events.lastSeq,
+          sseCostUsd: events.costUsd, accountingCostDeltaUsd: costDelta, model: snap.model,
+          modelDeltas: {}, byokDeltas: {}, tokenDelta: 0,
+          mainCapture: mainChanged && newCap ? Object.assign({ source: liveCapture(snap).source }, newCap) : null,
+          attribution: 'unknown', confidence: 'low', rationale: 'usage breakdown missing for this accounting window',
+        });
+      }
+      state.accountingPrev = Object.assign({}, snap, { items: prev.items, byok: prev.byok });
+      state.breakdownGap = true;
+      return null;
+    }
+
+    if (!events.count && !hasDelta && !costDelta) {
+      state.accountingPrev = snap;
+      if (hadBreakdown) state.breakdownGap = false;
+      return null;
+    }
+
+    let attr;
+    if (state.breakdownGap || !hadBreakdown) {
+      const oldCap = liveCapture(prev).split, newCap = liveCapture(snap).split;
+      attr = {
+        kind: 'unknown', confidence: 'low',
+        rationale: 'usage breakdown resumed after a gap; cumulative token delta spans an unobserved interval',
+        mainChanged: Boolean(newCap && captureKey(oldCap) !== captureKey(newCap)),
+      };
+    } else {
+      attr = classifyWindow(prev, snap, modelDeltas, byokDeltas, events.count);
+    }
     const live = liveCapture(snap);
-    const row = {
-      seq: ++state.ledgerSeq,
-      t: snap.t, from: prev.t, source: events.length ? 'sse' : 'poll',
-      eventCount: events.length,
-      eventSeqFirst: events.length ? events[0].seq : null,
-      eventSeqLast: events.length ? events[events.length - 1].seq : null,
-      sseCostUsd: events.reduce((sum, x) => sum + (x.costDeltaUsd || 0), 0),
-      accountingCostDeltaUsd: costDelta,
-      model: snap.model,
-      modelDeltas, byokDeltas,
-      tokenDelta: tokenQty(modelDeltas, byokDeltas),
+    appendLedger({
+      seq: ++state.ledgerSeq, t: snap.t, from: prev.t, source: events.count ? 'sse' : 'poll',
+      eventCount: events.count, eventSeqFirst: events.firstSeq, eventSeqLast: events.lastSeq,
+      sseCostUsd: events.costUsd, accountingCostDeltaUsd: costDelta,
+      model: snap.model, modelDeltas, byokDeltas, tokenDelta: tokenQty(modelDeltas, byokDeltas),
       mainCapture: attr.mainChanged && live.split ? Object.assign({ source: live.source }, live.split) : null,
       attribution: attr.kind, confidence: attr.confidence, rationale: attr.rationale,
-    };
-    state.ledger.push(row);
-    if (state.ledger.length > MAX_LEDGER) state.ledger.splice(0, state.ledger.length - MAX_LEDGER);
+    });
     state.accountingPrev = snap;
-    return row;
+    state.breakdownGap = false;
+    return state.ledger[state.ledger.length - 1] || null;
   }
 
   function recordMainCapture(snap) {
@@ -224,19 +305,6 @@
       acc.peak = Math.max(acc.peak, contextOf(cap)); return acc;
     }, { input: 0, output: 0, cacheRead: 0, cacheCreate: 0, peak: 0 });
   }
-  function runSplit(startSeq) {
-    const out = {
-      tokens: { main: 0, subagent: 0, mixed: 0, unknown: 0 },
-      events: { main: 0, subagent: 0, mixed: 0, unknown: 0 },
-      windows: { main: 0, subagent: 0, mixed: 0, unknown: 0 },
-    };
-    state.ledger.forEach(row => {
-      if (row.seq < startSeq) return;
-      const k = Object.prototype.hasOwnProperty.call(out.tokens, row.attribution) ? row.attribution : 'unknown';
-      out.tokens[k] += row.tokenDelta || 0; out.events[k] += row.eventCount || 0; out.windows[k] += 1;
-    });
-    return out;
-  }
 
   function closeTurn(snap) {
     const open = state.open;
@@ -253,7 +321,7 @@
       calls: open.caps.length, sampled: sumCaptures(open.caps),
       costDelta: Math.max(0, (snap.cost || 0) - (open.start.cost || 0)),
       phaseAtClose: snap.phase.k,
-      split: runSplit(open.ledgerStartSeq),
+      split: open.split,
     };
     state.turns.unshift(row);
     if (state.turns.length > MAX_TURNS) state.turns.length = MAX_TURNS;
@@ -272,13 +340,13 @@
       const baseline = state.latest && !state.latest.running ? state.latest : snap;
       state.open = {
         start: baseline, startedAt: snap.enqueuedAt || snap.t, source: snap.phase.source,
-        caps: [], ledgerStartSeq: state.ledgerSeq + 1,
+        caps: [], split: emptySplit(),
         lastMainCaptureKey: baseline === snap ? null : captureKey(liveCapture(baseline).split),
       };
     } else if (completedOffscreenCycle(snap)) {
       state.open = {
         start: state.latest, startedAt: snap.enqueuedAt, source: snap.phase.source,
-        caps: [], ledgerStartSeq: state.ledgerSeq + 1,
+        caps: [], split: emptySplit(),
         lastMainCaptureKey: captureKey(liveCapture(state.latest).split),
       };
     }
@@ -320,31 +388,45 @@
     return { fetchedAt: Date.now(), lines, totalUsd: lines.reduce((sum, x) => sum + (x.totalUsd || 0), 0) };
   }
 
-  async function withTimeout(promise, label) {
+  async function withTimeout(promise, label, timeoutMs) {
     let handle = null;
+    const ms = timeoutMs || FETCH_TIMEOUT_MS;
     try {
-      return await Promise.race([promise, new Promise((_, reject) => { handle = setTimeout(() => reject(new Error(label + ' timed out after ' + FETCH_TIMEOUT_MS + 'ms')), FETCH_TIMEOUT_MS); })]);
+      return await Promise.race([promise, new Promise((_, reject) => { handle = setTimeout(() => reject(new Error(label + ' timed out after ' + ms + 'ms')), ms); })]);
     } finally { if (handle) clearTimeout(handle); }
   }
-  async function getJSON(path) {
+  async function getJSON(path, timeoutMs) {
     const url = location.origin + path;
     result.fetches.push({ url, method: 'GET' });
     if (result.fetches.length > MAX_FETCHES) result.fetches.splice(0, result.fetches.length - MAX_FETCHES);
-    const response = await withTimeout(fetch(path, { method: 'GET', credentials: 'same-origin', headers: { accept: 'application/json' } }), path);
+    const response = await withTimeout(fetch(path, { method: 'GET', credentials: 'same-origin', headers: { accept: 'application/json' } }), path, timeoutMs);
     if (!response.ok) throw new Error(path + ' ' + response.status);
-    return withTimeout(response.json(), path + ' body');
+    return withTimeout(response.json(), path + ' body', timeoutMs);
   }
 
   async function refreshBilling(force) {
     if (stopped || !state || billingBusy) return;
     if (!force && billingAt && Date.now() - billingAt < BILLING_MS) return;
+    const gen = generation, captured = state;
     billingBusy = true;
+    billingAt = Date.now();
+    result.billingPending = true;
     try {
-      const payload = await getJSON('/api/settings/billing/usage');
-      result.billing = normalizeBilling(payload); result.billingError = null; billingAt = Date.now();
+      const payload = await getJSON('/api/settings/billing/usage', BILLING_TIMEOUT_MS);
+      if (stopped || gen !== generation || state !== captured) return;
+      result.billing = normalizeBilling(payload);
+      result.billingError = null;
     } catch (error) {
+      if (stopped || gen !== generation || state !== captured) return;
       result.billingError = String(error && error.message ? error.message : error);
-    } finally { billingBusy = false; publish(); }
+    } finally {
+      if (!stopped && gen === generation && state === captured) {
+        billingBusy = false;
+        result.billingReady = true;
+        result.billingPending = false;
+        publish();
+      }
+    }
   }
 
   function handleSseData(data) {
@@ -352,7 +434,11 @@
     try { parsed = JSON.parse(data); } catch (_) { return 'ignore'; }
     if (parsed.type !== 'cost-updated') return 'ignore';
     const seq = ++state.streamEvents;
-    state.pendingSse.push({ seq, t: Date.now(), costDeltaUsd: typeof parsed.costDeltaUsd === 'number' ? parsed.costDeltaUsd : 0 });
+    const pending = state.pendingSse;
+    pending.count += 1;
+    if (pending.firstSeq === null) pending.firstSeq = seq;
+    pending.lastSeq = seq;
+    pending.costUsd += typeof parsed.costDeltaUsd === 'number' ? parsed.costDeltaUsd : 0;
     return 'refresh';
   }
 
@@ -375,7 +461,7 @@
       ]);
       if (stopped || gen !== generation || threadId !== id || state !== captured) return;
       result.signedIn = true;
-      const phase = classify(status || {}, thread || {}), full = readBreakdown(breakdown || {}), totals = (usage && usage.totals) || {};
+      const phase = classify(status || {}, thread || {}), full = readBreakdown(breakdown), totals = (usage && usage.totals) || {};
       applySnapshot({
         t: Date.now(), model: thread.modelId || null, messages: thread.messageCount || 0, phase,
         running: phase.k === 'running', enqueuedAt: parseEpoch(status.lastEnqueuedAt), completeAt: parseEpoch(status.turnCompleteAt),
@@ -444,15 +530,16 @@
     globalThis.__nanoHyperagentObserve = result;
     const phase = result.latest && result.latest.phase ? result.latest.phase.label : 'idle';
     const err = result.error ? '\nerror: ' + result.error : '';
-    paint('Nano Reborn Hyperagent observe v6.1 (GET + SSE, no writes)\n' +
+    paint('Nano Reborn Hyperagent observe v6.2 (GET + SSE, no writes)\n' +
       'thread ' + (threadId || '(none)') + ' · ' + phase + ' · rows ' + result.rows.length +
       ' · ledger ' + result.ledger.length + ' · sse ' + (result.streamUp ? 'up' : 'down') +
-      ' · events ' + result.streamEvents + err);
+      ' · events ' + result.streamEvents + ' · billing ' + (result.billingPending ? 'loading' : result.billingReady ? 'ready' : 'pending') + err);
   }
 
   function resetPublishedThread() {
     threadId = null; state = null; result.threadId = null; result.signedIn = false;
-    result.rows = []; result.ledger = []; result.latest = null; result.billing = null; result.billingError = null;
+    result.rows = []; result.ledger = []; result.latest = null;
+    result.billing = null; result.billingError = null; result.billingReady = false; result.billingPending = false;
     result.streamEvents = 0; result.streamUp = null; globalThis.__nanoHyperagentObserve = result;
   }
   function onBeforeUnload() { closeStream(); }
@@ -480,9 +567,10 @@
     generation += 1; busy = false; refreshQueued = false; billingBusy = false; billingAt = 0;
     threadId = id; state = emptyState(id); result.error = null; result.done = false;
     result.threadId = id; result.signedIn = false; result.rows = []; result.ledger = []; result.latest = null;
-    result.billing = null; result.billingError = null; result.streamEvents = 0; result.streamUp = null; result.fetches = []; result.mutatingCalls = [];
+    result.billing = null; result.billingError = null; result.billingReady = false; result.billingPending = false;
+    result.streamEvents = 0; result.streamUp = null; result.fetches = []; result.mutatingCalls = [];
     globalThis.__nanoHyperagentObserve = result;
-    paint('Nano Reborn Hyperagent observe v6.1: establishing accounting baseline…');
+    paint('Nano Reborn Hyperagent observe v6.2: establishing accounting baseline…');
 
     openStream();
     requestRefresh();
