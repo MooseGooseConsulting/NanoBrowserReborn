@@ -6,6 +6,9 @@ import { t } from '@extension/i18n';
 interface ChatInputProps {
   onSendMessage: (text: string, displayText?: string) => void;
   onStopTask: () => void;
+  onPauseTask?: () => void;
+  onResumeTask?: () => void;
+  isPaused?: boolean;
   onMicClick?: () => void;
   isRecording?: boolean;
   isProcessingSpeech?: boolean;
@@ -30,6 +33,9 @@ interface AttachedFile {
 export default function ChatInput({
   onSendMessage,
   onStopTask,
+  onPauseTask,
+  onResumeTask,
+  isPaused = false,
   onMicClick,
   isRecording = false,
   isProcessingSpeech = false,
@@ -323,6 +329,24 @@ export default function ChatInput({
           </div>
 
           <div className="flex items-center gap-2">
+          {showStopButton && !isPaused && onPauseTask && (
+            <button
+              type="button"
+              onClick={onPauseTask}
+              aria-label="Pause task"
+              className="rounded-md bg-amber-500 px-3 py-1 text-white transition-colors hover:bg-amber-600">
+              Pause
+            </button>
+          )}
+          {showStopButton && isPaused && onResumeTask && (
+            <button
+              type="button"
+              onClick={onResumeTask}
+              aria-label="Resume task"
+              className="rounded-md bg-green-500 px-3 py-1 text-white transition-colors hover:bg-green-600">
+              Resume
+            </button>
+          )}
           {showStopButton && (
             <button
               type="button"

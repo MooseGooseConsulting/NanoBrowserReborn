@@ -98,6 +98,10 @@ export const closeTabActionSchema: ActionSchema = {
 };
 
 // Content Actions, not used currently
+// Deferred per ADR-004 (restore scope): extract_content stays out until page
+// input-size handling is decided and DOM/AX fast-path proves insufficient.
+// Deferred per ADR-004 (restore scope): no download schema either — future work
+// needs an allow-list/firewall contract for file targets first.
 // export const extractContentActionSchema: ActionSchema = {
 //   name: 'extract_content',
 //   description:

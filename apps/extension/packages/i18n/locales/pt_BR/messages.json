@@ -544,6 +544,9 @@
   "exec_task_pause": {
     "message": "Tarefa pausada"
   },
+  "exec_task_resume": {
+    "message": "Tarefa retomada"
+  },
   "exec_task_fail": {
     "message": "Tarefa falhou: \n\n$ERROR_MESSAGE$",
     "placeholders": {

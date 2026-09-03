@@ -184,6 +184,7 @@ export class ActionBuilder {
       this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, input.text);
       return new ActionResult({
         isDone: true,
+        success: input.success,
         extractedContent: input.text,
       });
     }, doneActionSchema);
@@ -358,7 +359,13 @@ export class ActionBuilder {
     actions.push(closeTab);
 
     // Content Actions
+    // Deferred per ADR-004 (restore scope): no download tool is built in this
+    // slice. A future decision needs evidence that the core drives a real task
+    // end to end first, plus an allow-list/firewall contract for file targets.
     // TODO: this is not used currently, need to improve on input size
+    // Deferred per ADR-004 (restore scope): extract_content stays commented
+    // out. A future decision needs input-size handling for page content plus
+    // evidence that DOM/AX fast-path extraction is insufficient.
     // const extractContent = new Action(async (input: z.infer<typeof extractContentActionSchema.schema>) => {
     //   const goal = input.goal;
     //   const intent = input.intent || `Extracting content from page`;

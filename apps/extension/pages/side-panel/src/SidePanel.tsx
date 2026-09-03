@@ -4,14 +4,22 @@ import { RxDiscordLogo } from 'react-icons/rx';
 import { FiSettings } from 'react-icons/fi';
 import { PiPlusBold } from 'react-icons/pi';
 import { GrHistory } from 'react-icons/gr';
-import { type Message, Actors, chatHistoryStore, agentModelStore, generalSettingsStore } from '@extension/storage';
+import { type Message, Actors, AgentNameEnum, chatHistoryStore, agentModelStore, generalSettingsStore } from '@extension/storage';
 import favoritesStorage, { type FavoritePrompt } from '@extension/storage/lib/prompt/favorites';
 import { t } from '@extension/i18n';
 import MessageList from './components/MessageList';
 import ChatInput from './components/ChatInput';
 import ChatHistoryList from './components/ChatHistoryList';
 import BookmarkList from './components/BookmarkList';
+import RunLog from './components/RunLog';
 import { EventType, type AgentEvent, ExecutionState } from './types/event';
+import {
+  appendRunLogEntry,
+  findLastUserTask,
+  getPauseTaskMessage,
+  getResumeTaskMessage,
+  type RunLogEntry,
+} from './sidePanelLogic';
 import './SidePanel.css';
 
 // Declare chrome API types
@@ -40,6 +48,8 @@ const SidePanel = () => {
   const [replayEnabled, setReplayEnabled] = useState(false);
   const [runPhase, setRunPhase] = useState<'running' | 'queued' | 'waiting' | 'error'>('waiting');
   const [runHint, setRunHint] = useState<string | null>(null);
+  const [isPaused, setIsPaused] = useState(false);
+  const [runLog, setRunLog] = useState<RunLogEntry[]>([]);
   const runPhaseRef = useRef<'running' | 'queued' | 'waiting' | 'error'>('waiting');
   const sessionIdRef = useRef<string | null>(null);
   const isReplayingRef = useRef<boolean>(false);
@@ -68,14 +78,16 @@ const SidePanel = () => {
     return () => darkModeMediaQuery.removeEventListener('change', handleChange);
   }, []);
 
-  // Check if models are configured
+  // Check if models are configured. Navigator is mandatory: background
+  // setupExecutor throws without a Navigator model, while Planner is optional
+  // (falls back to the Navigator LLM). See ADR-0001/ADR-0004.
   const checkModelConfiguration = useCallback(async () => {
     try {
       const configuredAgents = await agentModelStore.getConfiguredAgents();
 
-      // Check if at least one agent (preferably Navigator) is configured
-      const hasAtLeastOneModel = configuredAgents.length > 0;
-      setHasConfiguredModels(hasAtLeastOneModel);
+      // Navigator is mandatory (background setupExecutor throws without it);
+      // Planner is optional. sidePanelLogic.isNavigatorConfigured mirrors this for tests.
+      setHasConfiguredModels(configuredAgents.includes(AgentNameEnum.Navigator));
     } catch (error) {
       console.error('Error checking model configuration:', error);
       setHasConfiguredModels(false);
@@ -250,14 +262,27 @@ const SidePanel = () => {
 
       applyRunSnapshot(data?.run);
 
+      // Read-only run log of EXECUTION data already received (no protocol changes).
+      setRunLog(prev =>
+        appendRunLogEntry(prev, {
+          actor,
+          state,
+          step: data?.step ?? 0,
+          maxSteps: data?.maxSteps ?? 0,
+          timestamp,
+        }),
+      );
+
       switch (actor) {
         case Actors.SYSTEM:
           switch (state) {
             case ExecutionState.TASK_START:
               // Reset historical session flag when a new task starts
               setIsHistoricalSession(false);
+              setIsPaused(false);
               break;
             case ExecutionState.TASK_OK:
+              setIsPaused(false);
               setIsFollowUpMode(true);
               setInputEnabled(true);
               setIsReplaying(false);
@@ -266,6 +291,7 @@ const SidePanel = () => {
               }
               break;
             case ExecutionState.TASK_FAIL:
+              setIsPaused(false);
               setIsFollowUpMode(true);
               setInputEnabled(true);
               setIsReplaying(false);
@@ -275,6 +301,7 @@ const SidePanel = () => {
               skip = false;
               break;
             case ExecutionState.TASK_CANCEL:
+              setIsPaused(false);
               setIsFollowUpMode(false);
               setInputEnabled(true);
               setShowStopButton(false);
@@ -282,8 +309,13 @@ const SidePanel = () => {
               skip = false;
               break;
             case ExecutionState.TASK_PAUSE:
+              // Snapshot already applied above via applyRunSnapshot; track the
+              // paused flag so Resume replaces Pause next to Stop.
+              setIsPaused(true);
               break;
             case ExecutionState.TASK_RESUME:
+              // Snapshot already applied above via applyRunSnapshot.
+              setIsPaused(false);
               break;
             case ExecutionState.RUN_UPDATE:
               break;
@@ -814,7 +846,111 @@ const SidePanel = () => {
     }
     setInputEnabled(true);
     setShowStopButton(false);
+    setIsPaused(false);
   };
+
+  const handlePauseTask = useCallback(() => {
+    try {
+      portRef.current?.postMessage(getPauseTaskMessage());
+      // Optimistic: the flag is the source of truth. TASK_PAUSE is a
+      // best-effort confirmation (background emits it when a turn yields
+      // while paused; mid-step pauses spin-wait instead). Reset on
+      // TASK_OK/FAIL/CANCEL/START above.
+      setIsPaused(true);
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      console.error('pause_task error', errorMessage);
+      appendMessage({
+        actor: Actors.SYSTEM,
+        content: errorMessage,
+        timestamp: Date.now(),
+      });
+    }
+  }, [appendMessage]);
+
+  const handleResumeTask = useCallback(() => {
+    try {
+      portRef.current?.postMessage(getResumeTaskMessage());
+      // Optimistic: TASK_RESUME confirms it.
+      setIsPaused(false);
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      console.error('resume_task error', errorMessage);
+      appendMessage({
+        actor: Actors.SYSTEM,
+        content: errorMessage,
+        timestamp: Date.now(),
+      });
+    }
+  }, [appendMessage]);
+
+  // Error-retry path: re-send the last user task as a new_task, same pattern
+  // as handleSendMessage's new-task branch.
+  const handleRetry = useCallback(async () => {
+    const lastTask = findLastUserTask(messages);
+    if (!lastTask) {
+      return;
+    }
+    try {
+      if (!portRef.current) {
+        setupConnection();
+      }
+      await requestRunState();
+
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      const tabId = tabs[0]?.id;
+      if (!tabId) {
+        throw new Error('No active tab found');
+      }
+
+      const newSession = await chatHistoryStore.createSession(
+        lastTask.substring(0, 50) + (lastTask.length > 50 ? '...' : ''),
+      );
+      const sessionId = newSession.id;
+      setCurrentSessionId(sessionId);
+      sessionIdRef.current = sessionId;
+
+      setIsPaused(false);
+      setInputEnabled(false);
+      setRunPhase('running');
+      runPhaseRef.current = 'running';
+      setShowStopButton(true);
+      setIsFollowUpMode(false);
+      setIsHistoricalSession(false);
+      dispatchLockRef.current = true;
+
+      appendMessage(
+        {
+          actor: Actors.USER,
+          content: lastTask,
+          timestamp: Date.now(),
+        },
+        sessionId,
+      );
+
+      await sendMessage({
+        type: 'new_task',
+        task: lastTask,
+        taskId: sessionId,
+        tabId,
+      });
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      console.error('Retry error', errorMessage);
+      appendMessage({
+        actor: Actors.SYSTEM,
+        content: errorMessage,
+        timestamp: Date.now(),
+      });
+      setInputEnabled(true);
+      setShowStopButton(false);
+      dispatchLockRef.current = false;
+      runPhaseRef.current = 'waiting';
+      setRunPhase('waiting');
+      setRunHint(null);
+      stopConnection();
+    }
+  }, [messages, setupConnection, requestRunState, sendMessage, appendMessage, stopConnection]);
 
   const handleNewChat = () => {
     // Clear messages and start a new chat
@@ -823,6 +959,8 @@ const SidePanel = () => {
     sessionIdRef.current = null;
     setInputEnabled(true);
     setShowStopButton(false);
+    setIsPaused(false);
+    setRunLog([]);
     setIsFollowUpMode(false);
     setIsHistoricalSession(false);
     dispatchLockRef.current = false;
@@ -855,6 +993,8 @@ const SidePanel = () => {
       setMessages([]);
       setIsFollowUpMode(false);
       setIsHistoricalSession(false);
+      setIsPaused(false);
+      setRunLog([]);
     }
   };
 
@@ -866,6 +1006,8 @@ const SidePanel = () => {
         setMessages(fullSession.messages);
         setIsFollowUpMode(false);
         setIsHistoricalSession(true); // Mark this as a historical session
+        setIsPaused(false);
+        setRunLog([]);
         console.log('history session selected', sessionId);
       }
       setShowHistory(false);
@@ -1289,6 +1431,9 @@ const SidePanel = () => {
                       <ChatInput
                         onSendMessage={handleSendMessage}
                         onStopTask={handleStopTask}
+                        onPauseTask={handlePauseTask}
+                        onResumeTask={handleResumeTask}
+                        isPaused={isPaused}
                         onMicClick={handleMicClick}
                         isRecording={isRecording}
                         isProcessingSpeech={isProcessingSpeech}
@@ -1321,6 +1466,19 @@ const SidePanel = () => {
                     className={`scrollbar-gutter-stable flex-1 overflow-x-hidden overflow-y-scroll scroll-smooth p-2 ${isDarkMode ? 'bg-slate-900/80' : ''}`}>
                     <MessageList messages={messages} isDarkMode={isDarkMode} />
                     <div ref={messagesEndRef} />
+                  </div>
+                )}
+                {messages.length > 0 && <RunLog entries={runLog} isDarkMode={isDarkMode} />}
+                {messages.length > 0 && runPhase === 'error' && !isHistoricalSession && (
+                  <div className="flex justify-center px-2 pb-1">
+                    <button
+                      type="button"
+                      onClick={handleRetry}
+                      className={`rounded-md px-3 py-1 text-white transition-colors ${
+                        isDarkMode ? 'bg-sky-600 hover:bg-sky-700' : 'bg-sky-500 hover:bg-sky-600'
+                      }`}>
+                      Retry
+                    </button>
                   </div>
                 )}
                 {messages.length > 0 && (

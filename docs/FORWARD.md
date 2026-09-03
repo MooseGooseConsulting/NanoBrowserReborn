@@ -4,39 +4,26 @@ Patrick's personal LLM web harness (Leader/Follower). Not a product.
 
 Userscripts are **reviewed payloads** the harness injects, runs, and rewrites. One job of that pipeline is to keep those scripts current and organize ChatGPT scrap chats.
 
-This file is the **only** forward map. There is no older work order. Do **not** do BrowserPort first. Do **not** rebase LangGraph before userscripts.
+This file records landed work and active work order. Target architecture and decision authority live in `docs/adr/` (ADR-001 through ADR-004) and deferred gates live in `docs/PARKED.md`.
 
-Set-of-marks is **optional**. Do not rebuild `buildDomTree` / `highlightIndex`. Do not invent a new repo. Spec Kit is not the process. `drop/` is historical. `vendor/` is frozen. Work in `apps/extension` (and later `apps/stagehand-host`).
+Set-of-marks is **optional**. Do not rebuild `buildDomTree` / `highlightIndex`. Do not invent a new repo. Spec Kit is not the process. `drop/` is historical. `vendor/` is frozen. Work in `apps/extension`.
 
-## The only plan
+## Status
 
-1. **On main** — runner/fixture, ChatGPT organize, the overlay keep-current loop, and four-state Leader/Follower handling are landed.
-2. **This PR** — Hyperagent OBSERVE (`hyperagent-observe`): same-origin GET + SSE, one telemetry row per observed enqueue-to-complete run, no Hyperagent writes.
-3. **Later** — Stagehand host after a real CDP 5-step; MCP dispatch/config REST behind contract tests; LangGraph; marks/SAM.
-
-## On main (item 1)
-
-- Reviewed payload runner with current-origin registration, allow/deny checks, MAIN-world execution, and a packaged-seed/`chrome.storage.local` overlay contract.
-- `chatgpt-organize` is a one-shot `chatgpt.com` job: same-origin fetch and title PATCH; its recovery loop is capped to one repaired overlay retry.
-- Four-state Leader/Follower execution is merged. Keep replay, follow-up, pause/resume/cancel, and execution ordering intact.
-
-## This PR (item 2) — Hyperagent observe
-
-`hyperagent-observe` is origin-gated to `hyperagent.com` and `www.hyperagent.com`. It reads `/api/threads/{id}/status`, `/usage`, `/usage-breakdown`, and `/api/threads/{id}` with same-origin GET and treats SSE `/api/events/stream` as a refresh signal. It performs no DOM scraping, `PATCH`, `POST`, or MCP OAuth. A changed latest status enqueue/complete pair supports one recovered offscreen row; multiple cycles entirely between observations remain an explicit coverage gap because the status surface has no history.
-
-This PR must return observed rows through `run_userscript`; it must not merely inject a page-local observer. Backend ingestion, MCP dispatch, and REST configuration are follow-on work.
-
-## Later (item 3)
-
-Do not start these from the runner or from the observe stacked PR:
-
-- Stagehand host, and only after a real CDP 5-step has been run once (connect, observe, one `act`, teardown that leaves Chrome running)
-- Four-state completion (PR #4 already exists elsewhere)
-- MCP / REST
-- LangGraph overlay (pause/resume/cancel, side-panel events, `iteration` vs `navigationSteps`)
-- Marks / SAM (measure `buildDomTree` volume; route observe through Stagehand; SAM 3 only if observe is not enough)
-
-No host code until that CDP 5-step has been run once. Do not start with MarkMap, SQLite, or Spec Kit regeneration.
+1. **Landed on main** — userscript runner/fixture, ChatGPT organize, overlay keep-current loop, four-state Leader/Follower handling, and Hyperagent OBSERVE (`hyperagent-observe`, PR #8).
+2. **Landed in PR #16 (Restore & Rebase)**:
+   - **Sidebar restore**: Navigator-mandatory readiness gate, pause/resume senders, run-log view, error retry, side-panel test suite.
+   - **Executor restore**: Typed Follower control signal (`CONTINUE` / `SUBGOAL_COMPLETE` / `RETURN_TO_LEADER` / `BLOCKED`), enforced `planningInterval` and `maxActionsPerStep`, pause-strand fix.
+   - **LangGraph rebase**: Thin `StateGraph` rebase behind `USE_GRAPH_EXECUTOR=false` with parity tests.
+   - **BrowserPort seam**: In-tree port interface with `mv3` adapter and `fake` test port (ADR-003).
+   - **Decisions**: ADR-001 through ADR-004 + `docs/PARKED.md`.
+3. **Next up (unparked by gates in `docs/PARKED.md`)**:
+   - In-tree continuous E2E qualification (`turbo e2e` headless Chromium runner).
+   - Wire Executor to `BrowserPort` seam for offline `fake.ts` simulation.
+   - Portable config file + secret-store wiring (Doppler → OpenBao/keychain) per ADR-001.
+   - Durable checkpoints beyond SQLite + persisted trace.
+   - Exterior message bus / external supervision ("Exterior Dispatcher") once core drives real sidebar tasks end to end.
+   *(Note: Stagehand/CDP host is explicitly excluded from the extension roadmap per ADR-003 to preserve stealth and zero-daemon UX).*
 
 ## Gates that stay
 
@@ -67,7 +54,7 @@ POC under `drop/chatgpt-exporter-test/nanobrowser-poc` remains historical proof 
 - Leader/Follower UX and Executor entrypoint
 - Follow-ups, history, replay, pause/resume/cancel
 - Dual counters (`maxSteps` vs planning cadence)
-- Existing deterministic knobs until "deterministic scaling" is identified in code
+- Deterministic scaling as planning cadence (ADR-002: `planningInterval` backstopped by typed Follower return signals)
 - Injection-safety URL blocks (`chrome://`, `chrome-extension://`, `javascript:`, `data:`)
 - Apache-2.0 notices
 
