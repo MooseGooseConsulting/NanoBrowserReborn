@@ -3,6 +3,8 @@ import { isHyperagentObserveOrigin } from './catalog';
 export const HYPERAGENT_THREAD_PATH = /\/thread\/([^/?#]+)/;
 
 export type RunPhaseKind = 'running' | 'queued' | 'waiting' | 'error' | 'new' | 'idle';
+export type AttributionKind = 'main' | 'subagent' | 'mixed' | 'unknown';
+export type AttributionConfidence = 'high' | 'medium' | 'low';
 
 export interface RunPhase {
   k: RunPhaseKind;
@@ -39,6 +41,32 @@ export interface ObserveSnapshot {
   byok: Record<string, TokenSplit> | null;
 }
 
+export interface ObserveLedgerWindow {
+  seq: number;
+  t: number;
+  from: number;
+  source: 'sse' | 'poll';
+  eventCount: number;
+  eventSeqFirst: number | null;
+  eventSeqLast: number | null;
+  sseCostUsd: number;
+  accountingCostDeltaUsd: number;
+  model: string | null;
+  modelDeltas: Record<string, MeteredItem>;
+  byokDeltas: Record<string, TokenSplit>;
+  tokenDelta: number;
+  mainCapture: (TokenSplit & { source: 'capture' | 'indicator' }) | null;
+  attribution: AttributionKind;
+  confidence: AttributionConfidence;
+  rationale: string;
+}
+
+export interface AttributionSplit {
+  tokens: Record<AttributionKind, number>;
+  events: Record<AttributionKind, number>;
+  windows: Record<AttributionKind, number>;
+}
+
 export interface ObserveRow {
   n: number;
   threadId: string;
@@ -55,20 +83,36 @@ export interface ObserveRow {
   sampled: TokenSplit & { peak: number };
   costDelta: number;
   phaseAtClose: RunPhaseKind;
+  /** v6 accounting-window attribution; optional for restored v5 rows. */
+  split?: AttributionSplit;
 }
 
 export interface OpenRun {
   start: ObserveSnapshot;
   startedAt: number;
-  caps: Array<TokenSplit & { t: number }>;
-  lastCaptureKeyBySource: Partial<Record<'capture' | 'indicator', string>>;
+  caps: Array<TokenSplit & { t: number; source?: 'capture' | 'indicator' }>;
+  lastMainCaptureKey: string | null;
   source: string | null;
+  split: AttributionSplit;
+}
+
+export interface PendingSseSummary {
+  count: number;
+  firstSeq: number | null;
+  lastSeq: number | null;
+  costUsd: number;
 }
 
 export interface ObserveReducerState {
   threadId: string;
   turns: ObserveRow[];
-  captures: Array<TokenSplit & { t: number }>;
+  captures: Array<TokenSplit & { t: number; source?: 'capture' | 'indicator' }>;
+  ledger: ObserveLedgerWindow[];
+  ledgerSeq: number;
+  accountingPrev: ObserveSnapshot | null;
+  breakdownGap: boolean;
+  pendingSse: PendingSseSummary;
+  lastMainCaptureKey: string | null;
   open: OpenRun | null;
   latest: ObserveSnapshot | null;
   streamEvents: number;
@@ -115,10 +159,39 @@ export interface UsageBreakdownPayload {
   }>;
 }
 
+export interface BillingRateLine {
+  name: string;
+  quantity: number | null;
+  totalUsd: number | null;
+  ratePerToken: number | null;
+  ratePerMillion: number | null;
+  passThrough: boolean;
+}
+
+export interface BillingRateCard {
+  fetchedAt: number;
+  lines: BillingRateLine[];
+  totalUsd: number;
+}
+
 const ZERO: TokenSplit = { input: 0, output: 0, cacheRead: 0, cacheCreate: 0 };
 export const MAX_OBSERVE_TURNS = 300;
 export const MAX_OBSERVE_CAPTURES = 5000;
+export const MAX_OBSERVE_LEDGER = 2500;
 export const OBSERVE_FETCH_TIMEOUT_MS = 15_000;
+export const OBSERVE_BILLING_TIMEOUT_MS = 2_500;
+
+function emptyPendingSse(): PendingSseSummary {
+  return { count: 0, firstSeq: null, lastSeq: null, costUsd: 0 };
+}
+
+function emptyAttributionSplit(): AttributionSplit {
+  return {
+    tokens: { main: 0, subagent: 0, mixed: 0, unknown: 0 },
+    events: { main: 0, subagent: 0, mixed: 0, unknown: 0 },
+    windows: { main: 0, subagent: 0, mixed: 0, unknown: 0 },
+  };
+}
 
 export function threadIdFromPath(pathname: string): string | null {
   const match = pathname.match(HYPERAGENT_THREAD_PATH);
@@ -126,9 +199,7 @@ export function threadIdFromPath(pathname: string): string | null {
 }
 
 export function parseEpoch(value: string | null | undefined): number {
-  if (!value) {
-    return 0;
-  }
+  if (!value) return 0;
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : 0;
 }
@@ -139,24 +210,14 @@ export function classifyRunPhase(status: ThreadStatusPayload, thread?: ThreadPay
   const queued = Array.isArray(status.pendingQueue) ? status.pendingQueue.length : 0;
   const source = status.runningTurnSource || null;
 
-  if (thread && thread.lastMessageIsError) {
+  if (thread?.lastMessageIsError) {
     return { k: 'error', label: 'stopped on error', queued, since: completeAt, source };
   }
   if (enqueuedAt > completeAt) {
-    return {
-      k: 'running',
-      label: source ? `running (${source})` : 'running',
-      queued,
-      since: enqueuedAt,
-      source,
-    };
+    return { k: 'running', label: source ? `running (${source})` : 'running', queued, since: enqueuedAt, source };
   }
-  if (queued) {
-    return { k: 'queued', label: `queued x${queued}`, queued, since: completeAt, source };
-  }
-  if (!enqueuedAt && !completeAt) {
-    return { k: 'new', label: 'no runs yet', queued: 0, since: 0, source };
-  }
+  if (queued) return { k: 'queued', label: `queued x${queued}`, queued, since: completeAt, source };
+  if (!enqueuedAt && !completeAt) return { k: 'new', label: 'no runs yet', queued: 0, since: 0, source };
   if (status.lastRunMessageRole === 'assistant') {
     return { k: 'waiting', label: 'waiting for you', queued: 0, since: completeAt, source };
   }
@@ -164,9 +225,7 @@ export function classifyRunPhase(status: ThreadStatusPayload, thread?: ThreadPay
 }
 
 export function normalizeCapture(capture: TokenCapturePayload | null | undefined): TokenSplit | null {
-  if (!capture) {
-    return null;
-  }
+  if (!capture) return null;
   return {
     input: capture.input_tokens || 0,
     output: capture.output_tokens || 0,
@@ -177,6 +236,11 @@ export function normalizeCapture(capture: TokenCapturePayload | null | undefined
 
 export function captureKey(split: TokenSplit | null): string | null {
   return split ? `${split.input}/${split.output}/${split.cacheRead}/${split.cacheCreate}` : null;
+}
+
+function liveCapture(snap: ObserveSnapshot): { split: TokenSplit | null; source: 'capture' | 'indicator' } {
+  if (snap.capture) return { split: snap.capture, source: 'capture' };
+  return { split: snap.indicator, source: 'indicator' };
 }
 
 export function readBreakdown(breakdown: UsageBreakdownPayload | null | undefined): {
@@ -207,7 +271,6 @@ export function snapshotFromApis(
   now: number,
 ): ObserveSnapshot {
   const phase = classifyRunPhase(status, thread);
-  const totals = usage.totals || {};
   const full = breakdown ? readBreakdown(breakdown) : { items: null, byok: null };
   return {
     t: now,
@@ -219,7 +282,7 @@ export function snapshotFromApis(
     completeAt: parseEpoch(status.turnCompleteAt),
     capture: normalizeCapture(usage.lastCapture),
     indicator: normalizeCapture(thread.lastContextIndicator),
-    cost: totals.total_cost_usd || 0,
+    cost: usage.totals?.total_cost_usd || 0,
     items: full.items,
     byok: full.byok,
   };
@@ -230,6 +293,12 @@ export function emptyObserveState(threadId: string): ObserveReducerState {
     threadId,
     turns: [],
     captures: [],
+    ledger: [],
+    ledgerSeq: 0,
+    accountingPrev: null,
+    breakdownGap: false,
+    pendingSse: emptyPendingSse(),
+    lastMainCaptureKey: null,
     open: null,
     latest: null,
     streamEvents: 0,
@@ -242,31 +311,31 @@ function contextOf(split: TokenSplit | null): number {
   return split ? split.input + split.cacheRead : 0;
 }
 
-function meteredDelta(
-  start: Record<string, MeteredItem> | null,
-  end: Record<string, MeteredItem> | null,
-): Record<string, number> {
+function meteredDelta(start: Record<string, MeteredItem> | null, end: Record<string, MeteredItem> | null): Record<string, number> {
   const delta: Record<string, number> = {};
-  if (!start || !end) {
-    return delta;
-  }
+  if (!start || !end) return delta;
   for (const [name, item] of Object.entries(end)) {
-    const change = item.qty - (start[name] ? start[name].qty : 0);
-    if (change) {
-      delta[name] = change;
-    }
+    const change = item.qty - (start[name]?.qty || 0);
+    if (change) delta[name] = change;
   }
   return delta;
 }
 
-function byokDelta(
-  start: Record<string, TokenSplit> | null,
-  end: Record<string, TokenSplit> | null,
-): Record<string, TokenSplit> {
-  const delta: Record<string, TokenSplit> = {};
-  if (!start || !end) {
-    return delta;
+function itemDelta(start: Record<string, MeteredItem> | null, end: Record<string, MeteredItem> | null): Record<string, MeteredItem> {
+  const delta: Record<string, MeteredItem> = {};
+  if (!start || !end) return delta;
+  for (const [name, item] of Object.entries(end)) {
+    const previous = start[name] || { qty: 0, cost: 0 };
+    const qty = item.qty - previous.qty;
+    const cost = item.cost - previous.cost;
+    if (qty || Math.abs(cost) > 1e-12) delta[name] = { qty, cost };
   }
+  return delta;
+}
+
+function byokDelta(start: Record<string, TokenSplit> | null, end: Record<string, TokenSplit> | null): Record<string, TokenSplit> {
+  const delta: Record<string, TokenSplit> = {};
+  if (!start || !end) return delta;
   for (const [model, current] of Object.entries(end)) {
     const previous = start[model] || ZERO;
     const change: TokenSplit = {
@@ -275,74 +344,246 @@ function byokDelta(
       cacheRead: current.cacheRead - previous.cacheRead,
       cacheCreate: current.cacheCreate - previous.cacheCreate,
     };
-    if (change.input || change.output || change.cacheRead || change.cacheCreate) {
-      delta[model] = change;
-    }
+    if (change.input || change.output || change.cacheRead || change.cacheCreate) delta[model] = change;
   }
   return delta;
 }
 
-function sumCaptures(list: Array<TokenSplit>): TokenSplit & { peak: number } {
-  return list.reduce<TokenSplit & { peak: number }>(
-    (acc, cap) => {
-      acc.input += cap.input;
-      acc.output += cap.output;
-      acc.cacheRead += cap.cacheRead;
-      acc.cacheCreate += cap.cacheCreate;
-      acc.peak = Math.max(acc.peak, contextOf(cap));
-      return acc;
-    },
-    { input: 0, output: 0, cacheRead: 0, cacheCreate: 0, peak: 0 },
+function byokTokenDelta(byok: Record<string, TokenSplit>): number {
+  return Object.values(byok).reduce(
+    (sum, x) => sum + Math.max(0, x.input) + Math.max(0, x.output) + Math.max(0, x.cacheRead) + Math.max(0, x.cacheCreate),
+    0,
   );
 }
 
-function recordCapture(
+function itemTokenDelta(items: Record<string, MeteredItem>): number {
+  return Object.entries(items).reduce((sum, [name, x]) => (/Tokens$/i.test(name) ? sum + Math.max(0, x.qty) : sum), 0);
+}
+
+function modelTail(value: string | null | undefined): string {
+  const text = String(value || '');
+  return text.includes('/') ? text.split('/').pop() || text : text;
+}
+
+function modelParts(value: string | null | undefined): string[] {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/\s+tokens?$/i, '')
+    .replace(/^(openai|anthropic|google|deepseek|z-ai|moonshotai|x-ai|meta-llama|mistralai)\//, '')
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+}
+
+function versionOnlySuffix(parts: string[]): boolean {
+  if (!parts.length) return false;
+  if (parts.length === 1 && /^\d{6,}$/.test(parts[0])) return true;
+  return parts.length === 3 && /^\d{4}$/.test(parts[0]) && /^\d{1,2}$/.test(parts[1]) && /^\d{1,2}$/.test(parts[2]);
+}
+
+function itemMatchesModel(itemName: string, model: string | null): boolean {
+  const left = modelParts(itemName.replace(/\s+Tokens$/i, ''));
+  const right = modelParts(modelTail(model));
+  if (!left.length || !right.length) return false;
+  if (left.join(':') === right.join(':')) return true;
+  const short = left.length < right.length ? left : right;
+  const long = left.length < right.length ? right : left;
+  if (!short.every((part, index) => long[index] === part)) return false;
+  return versionOnlySuffix(long.slice(short.length));
+}
+
+function classifyWindow(
+  prev: ObserveSnapshot,
+  snap: ObserveSnapshot,
+  items: Record<string, MeteredItem>,
+  byok: Record<string, TokenSplit>,
+  eventCount: number,
+): { kind: AttributionKind; confidence: AttributionConfidence; rationale: string; mainChanged: boolean } {
+  const prevCap = liveCapture(prev).split;
+  const nextCap = liveCapture(snap).split;
+  const mainChanged = Boolean(nextCap && captureKey(prevCap) !== captureKey(nextCap));
+  const tokenNames = Object.entries(items)
+    .filter(([name, x]) => /Tokens$/i.test(name) && x.qty > 0)
+    .map(([name]) => name);
+  const byokNames = Object.entries(byok)
+    .filter(([, x]) => x.input > 0 || x.output > 0 || x.cacheRead > 0 || x.cacheCreate > 0)
+    .map(([name]) => name);
+  const mainModelSeen = tokenNames.some(name => itemMatchesModel(name, snap.model)) || byokNames.some(name => itemMatchesModel(name, snap.model));
+  const otherModelSeen = tokenNames.some(name => !itemMatchesModel(name, snap.model)) || byokNames.some(name => !itemMatchesModel(name, snap.model));
+
+  let kind: AttributionKind = 'unknown';
+  let rationale = 'no attributable model/capture delta';
+  if (mainChanged && otherModelSeen) {
+    kind = 'mixed';
+    rationale = 'main capture changed while non-main model counters also advanced';
+  } else if (mainChanged && mainModelSeen && !otherModelSeen) {
+    kind = 'main';
+    rationale = 'main capture changed and only the thread model advanced';
+  } else if (!mainChanged && otherModelSeen && !mainModelSeen) {
+    kind = 'subagent';
+    rationale = 'no main capture change and only non-main model counters advanced';
+  } else if (!mainChanged && (mainModelSeen || otherModelSeen)) {
+    kind = 'unknown';
+    rationale = 'model counters advanced without a new main capture; same-model subagents are indistinguishable';
+  } else if (mainChanged) {
+    kind = 'main';
+    rationale = 'main capture changed; no model-level token line was available';
+  }
+
+  let confidence: AttributionConfidence = 'low';
+  if (eventCount === 1 && (kind === 'main' || kind === 'subagent')) confidence = 'high';
+  else if (eventCount === 1 && kind === 'mixed') confidence = 'medium';
+  else if (eventCount > 1 && kind !== 'unknown') confidence = 'medium';
+  return { kind, confidence, rationale, mainChanged };
+}
+
+function takePendingSse(state: ObserveReducerState): PendingSseSummary {
+  const pending = state.pendingSse;
+  state.pendingSse = emptyPendingSse();
+  return pending;
+}
+
+function addSplit(split: AttributionSplit, row: ObserveLedgerWindow): void {
+  split.tokens[row.attribution] += row.tokenDelta;
+  split.events[row.attribution] += row.eventCount;
+  split.windows[row.attribution] += 1;
+}
+
+function appendLedger(state: ObserveReducerState, row: ObserveLedgerWindow): ObserveLedgerWindow {
+  state.ledger.push(row);
+  if (state.open) addSplit(state.open.split, row);
+  if (state.ledger.length > MAX_OBSERVE_LEDGER) state.ledger.splice(0, state.ledger.length - MAX_OBSERVE_LEDGER);
+  return row;
+}
+
+function missingBreakdownWindow(
   state: ObserveReducerState,
-  split: TokenSplit | null,
-  at: number,
-  source: 'capture' | 'indicator',
-): void {
-  if (!split) {
-    return;
+  prev: ObserveSnapshot,
+  snap: ObserveSnapshot,
+  events: PendingSseSummary,
+  accountingCostDeltaUsd: number,
+): ObserveLedgerWindow | null {
+  if (!events.count && accountingCostDeltaUsd <= 0) return null;
+  const live = liveCapture(snap);
+  const mainChanged = Boolean(live.split && captureKey(liveCapture(prev).split) !== captureKey(live.split));
+  return appendLedger(state, {
+    seq: ++state.ledgerSeq,
+    t: snap.t,
+    from: prev.t,
+    source: events.count ? 'sse' : 'poll',
+    eventCount: events.count,
+    eventSeqFirst: events.firstSeq,
+    eventSeqLast: events.lastSeq,
+    sseCostUsd: events.costUsd,
+    accountingCostDeltaUsd,
+    model: snap.model,
+    modelDeltas: {},
+    byokDeltas: {},
+    tokenDelta: 0,
+    mainCapture: mainChanged && live.split ? { ...live.split, source: live.source } : null,
+    attribution: 'unknown',
+    confidence: 'low',
+    rationale: 'usage breakdown missing for this accounting window',
+  });
+}
+
+function reduceAccountingWindow(state: ObserveReducerState, snap: ObserveSnapshot): ObserveLedgerWindow | null {
+  const prev = state.accountingPrev;
+  if (!prev) {
+    state.accountingPrev = snap;
+    state.breakdownGap = snap.items === null || snap.byok === null;
+    return null;
   }
-  const key = captureKey(split);
-  if (!key || key === '0/0/0/0') {
-    return;
+
+  const events = takePendingSse(state);
+  const accountingCostDeltaUsd = Math.max(0, snap.cost - prev.cost);
+  const hasBreakdown = snap.items !== null && snap.byok !== null;
+  const hadBreakdown = prev.items !== null && prev.byok !== null;
+
+  if (!hasBreakdown) {
+    const row = missingBreakdownWindow(state, prev, snap, events, accountingCostDeltaUsd);
+    state.accountingPrev = { ...snap, items: prev.items, byok: prev.byok };
+    state.breakdownGap = true;
+    return row;
   }
-  if (state.open?.lastCaptureKeyBySource[source] === key) {
-    return;
+
+  const modelDeltas = hadBreakdown ? itemDelta(prev.items, snap.items) : {};
+  const byokDeltas = hadBreakdown ? byokDelta(prev.byok, snap.byok) : {};
+  const hasDelta = Object.keys(modelDeltas).length > 0 || Object.keys(byokDeltas).length > 0;
+  if (!events.count && !hasDelta && accountingCostDeltaUsd <= 0) {
+    state.accountingPrev = snap;
+    if (hadBreakdown) state.breakdownGap = false;
+    return null;
   }
-  const rec = { t: at, ...split };
+
+  const live = liveCapture(snap);
+  const attr = state.breakdownGap || !hadBreakdown
+    ? {
+        kind: 'unknown' as const,
+        confidence: 'low' as const,
+        rationale: 'usage breakdown resumed after a gap; cumulative token delta spans an unobserved interval',
+        mainChanged: Boolean(live.split && captureKey(liveCapture(prev).split) !== captureKey(live.split)),
+      }
+    : classifyWindow(prev, snap, modelDeltas, byokDeltas, events.count);
+
+  const row = appendLedger(state, {
+    seq: ++state.ledgerSeq,
+    t: snap.t,
+    from: prev.t,
+    source: events.count ? 'sse' : 'poll',
+    eventCount: events.count,
+    eventSeqFirst: events.firstSeq,
+    eventSeqLast: events.lastSeq,
+    sseCostUsd: events.costUsd,
+    accountingCostDeltaUsd,
+    model: snap.model,
+    modelDeltas,
+    byokDeltas,
+    tokenDelta: itemTokenDelta(modelDeltas) + byokTokenDelta(byokDeltas),
+    mainCapture: attr.mainChanged && live.split ? { ...live.split, source: live.source } : null,
+    attribution: attr.kind,
+    confidence: attr.confidence,
+    rationale: attr.rationale,
+  });
+  state.accountingPrev = snap;
+  state.breakdownGap = false;
+  return row;
+}
+
+function sumCaptures(list: Array<TokenSplit>): TokenSplit & { peak: number } {
+  return list.reduce<TokenSplit & { peak: number }>((acc, cap) => {
+    acc.input += cap.input;
+    acc.output += cap.output;
+    acc.cacheRead += cap.cacheRead;
+    acc.cacheCreate += cap.cacheCreate;
+    acc.peak = Math.max(acc.peak, contextOf(cap));
+    return acc;
+  }, { input: 0, output: 0, cacheRead: 0, cacheCreate: 0, peak: 0 });
+}
+
+function recordMainCapture(state: ObserveReducerState, snap: ObserveSnapshot): void {
+  const live = liveCapture(snap);
+  if (!live.split) return;
+  const key = captureKey(live.split);
+  if (!key || key === '0/0/0/0') return;
+  const previous = state.open?.lastMainCaptureKey ?? state.lastMainCaptureKey;
+  if (previous === key) return;
+  const rec = { t: snap.t, source: live.source, ...live.split };
   state.captures.push(rec);
-  if (state.captures.length > MAX_OBSERVE_CAPTURES) {
-    state.captures.splice(0, state.captures.length - MAX_OBSERVE_CAPTURES);
-  }
+  if (state.captures.length > MAX_OBSERVE_CAPTURES) state.captures.splice(0, state.captures.length - MAX_OBSERVE_CAPTURES);
+  state.lastMainCaptureKey = key;
   if (state.open) {
-    state.open.lastCaptureKeyBySource[source] = key;
+    state.open.lastMainCaptureKey = key;
     state.open.caps.push(rec);
   }
 }
 
-function captureKeysFromSnapshot(snap: ObserveSnapshot): Partial<Record<'capture' | 'indicator', string>> {
-  const capture = captureKey(snap.capture);
-  const indicator = captureKey(snap.indicator);
-  return {
-    ...(capture ? { capture } : {}),
-    ...(indicator ? { indicator } : {}),
-  };
-}
-
 function closeTurn(state: ObserveReducerState, snap: ObserveSnapshot): ObserveRow {
   const open = state.open as OpenRun;
-  const metered = meteredDelta(open.start.items, snap.items);
-  let burn = 0;
-  for (const [name, qty] of Object.entries(metered)) {
-    if (/Tokens$/.test(name)) {
-      burn += qty;
-    }
-  }
-  // Failed runs can retain the previous completion timestamp. Close at this
-  // observation instead of emitting a negative-duration row.
+  const accountingEnd = state.accountingPrev;
+  const endItems = snap.items ?? accountingEnd?.items ?? null;
+  const endByok = snap.byok ?? accountingEnd?.byok ?? null;
+  const metered = meteredDelta(open.start.items, endItems);
+  const burn = Object.entries(metered).reduce((sum, [name, qty]) => (/Tokens$/.test(name) ? sum + qty : sum), 0);
   const endedAt = snap.completeAt >= open.startedAt ? snap.completeAt : snap.t;
   const row: ObserveRow = {
     n: state.turns.reduce((max, turn) => Math.max(max, turn.n), 0) + 1,
@@ -355,80 +596,125 @@ function closeTurn(state: ObserveReducerState, snap: ObserveSnapshot): ObserveRo
     source: open.source,
     metered,
     burn,
-    byok: byokDelta(open.start.byok, snap.byok),
+    byok: byokDelta(open.start.byok, endByok),
     calls: open.caps.length,
     sampled: sumCaptures(open.caps),
-    // /usage cumulative totals are the accounting authority. SSE asks us to re-read them;
-    // an SSE delta is never substituted or added, avoiding double-counted run cost.
-    costDelta: Math.max(0, (snap.cost || 0) - (open.start.cost || 0)),
+    costDelta: Math.max(0, snap.cost - open.start.cost),
     phaseAtClose: snap.phase.k,
+    split: open.split,
   };
   state.turns.unshift(row);
-  if (state.turns.length > MAX_OBSERVE_TURNS) {
-    state.turns.length = MAX_OBSERVE_TURNS;
-  }
+  if (state.turns.length > MAX_OBSERVE_TURNS) state.turns.length = MAX_OBSERVE_TURNS;
   state.open = null;
   return row;
 }
 
 function completedOffscreenCycle(state: ObserveReducerState, snap: ObserveSnapshot): boolean {
   const prev = state.latest;
-  return Boolean(
-    !snap.running &&
-      !state.open &&
-      prev &&
-      snap.enqueuedAt > prev.enqueuedAt &&
-      snap.completeAt >= snap.enqueuedAt,
-  );
+  return Boolean(!snap.running && !state.open && prev && snap.enqueuedAt > prev.enqueuedAt && snap.completeAt >= snap.enqueuedAt);
 }
 
 export function applyObserveSnapshot(state: ObserveReducerState, snap: ObserveSnapshot): ObserveRow | null {
   state.err = null;
-
   if (snap.running && !state.open) {
     const baseline = state.latest && !state.latest.running ? state.latest : snap;
     state.open = {
       start: baseline,
       startedAt: snap.enqueuedAt || snap.t,
       caps: [],
-      lastCaptureKeyBySource: baseline === snap ? {} : captureKeysFromSnapshot(baseline),
+      lastMainCaptureKey: baseline === snap ? null : captureKey(liveCapture(baseline).split),
       source: snap.phase.source,
+      split: emptyAttributionSplit(),
     };
   } else if (completedOffscreenCycle(state, snap) && state.latest) {
-    // Status exposes the latest enqueue/complete pair even if polling missed
-    // the running interval. Emit that concrete cycle rather than no telemetry.
     state.open = {
       start: state.latest,
       startedAt: snap.enqueuedAt,
       caps: [],
-      lastCaptureKeyBySource: captureKeysFromSnapshot(state.latest),
+      lastMainCaptureKey: captureKey(liveCapture(state.latest).split),
       source: snap.phase.source,
+      split: emptyAttributionSplit(),
     };
   }
 
-  recordCapture(state, snap.capture, snap.t, 'capture');
-  recordCapture(state, snap.indicator, snap.t, 'indicator');
+  recordMainCapture(state, snap);
+  reduceAccountingWindow(state, snap);
 
   let closed: ObserveRow | null = null;
-  if (!snap.running && state.open) {
-    closed = closeTurn(state, snap);
-  }
+  if (!snap.running && state.open) closed = closeTurn(state, snap);
   state.latest = snap;
   return closed;
 }
 
 export function handleSseData(state: ObserveReducerState, data: string): 'refresh' | 'ignore' {
-  let parsed: { type?: string };
+  let parsed: { type?: string; costDeltaUsd?: number };
   try {
     parsed = JSON.parse(data) as { type?: string; costDeltaUsd?: number };
   } catch {
     return 'ignore';
   }
-  if (parsed.type === 'cost-updated') {
-    state.streamEvents += 1;
-    return 'refresh';
+  if (parsed.type !== 'cost-updated') return 'ignore';
+  const seq = ++state.streamEvents;
+  state.pendingSse.count += 1;
+  if (state.pendingSse.firstSeq === null) state.pendingSse.firstSeq = seq;
+  state.pendingSse.lastSeq = seq;
+  state.pendingSse.costUsd += typeof parsed.costDeltaUsd === 'number' ? parsed.costDeltaUsd : 0;
+  return 'refresh';
+}
+
+function numberField(value: Record<string, unknown>, names: string[]): number | null {
+  for (const name of names) {
+    const candidate = value[name];
+    if (typeof candidate === 'number' && Number.isFinite(candidate)) return candidate;
+    if (typeof candidate === 'string' && candidate.trim() && Number.isFinite(Number(candidate))) return Number(candidate);
   }
-  return 'ignore';
+  return null;
+}
+
+function stringField(value: Record<string, unknown>, names: string[]): string | null {
+  for (const name of names) {
+    const candidate = value[name];
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+  }
+  return null;
+}
+
+function findPerPriceCosts(value: unknown, depth = 0): unknown {
+  if (!value || typeof value !== 'object' || depth > 7) return null;
+  const object = value as Record<string, unknown>;
+  if (object.perPriceCosts && typeof object.perPriceCosts === 'object') return object.perPriceCosts;
+  for (const child of Object.values(object)) {
+    const found = findPerPriceCosts(child, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+export function normalizeBillingUsage(payload: unknown, now = Date.now()): BillingRateCard {
+  const raw = findPerPriceCosts(payload);
+  const entries: Array<[string, unknown]> = Array.isArray(raw)
+    ? raw.map((value, index) => [String(index), value])
+    : raw && typeof raw === 'object'
+      ? Object.entries(raw as Record<string, unknown>)
+      : [];
+  const lines = entries
+    .map(([key, rawLine]): BillingRateLine => {
+      const line = rawLine && typeof rawLine === 'object' ? rawLine as Record<string, unknown> : {};
+      const name = stringField(line, ['priceName', 'name', 'displayName', 'metricName', 'price_name']) || key;
+      const quantity = numberField(line, ['quantity', 'qty', 'usageQuantity', 'usage', 'units']);
+      const totalUsd = numberField(line, ['total', 'totalCost', 'cost', 'costUsd', 'amount', 'total_cost_usd']);
+      const ratePerToken = quantity && totalUsd !== null ? totalUsd / quantity : null;
+      return {
+        name,
+        quantity,
+        totalUsd,
+        ratePerToken,
+        ratePerMillion: ratePerToken === null ? null : ratePerToken * 1_000_000,
+        passThrough: /other usage/i.test(name) || !quantity,
+      };
+    })
+    .filter(line => (line.quantity || 0) !== 0 || (line.totalUsd || 0) !== 0);
+  return { fetchedAt: now, lines, totalUsd: lines.reduce((sum, line) => sum + (line.totalUsd || 0), 0) };
 }
 
 export interface ObserveFetchInit {
@@ -436,32 +722,12 @@ export interface ObserveFetchInit {
   headers?: Record<string, string>;
   body?: string;
 }
-
-export interface ObserveFetchResponse {
-  ok: boolean;
-  status: number;
-  statusText: string;
-  json: () => Promise<unknown>;
-}
-
+export interface ObserveFetchResponse { ok: boolean; status: number; statusText: string; json: () => Promise<unknown>; }
 export type ObserveFetch = (url: string, init?: ObserveFetchInit) => Promise<ObserveFetchResponse>;
-
-export interface ObserveSseHandlers {
-  onopen?: () => void;
-  onmessage?: (event: { data: string }) => void | Promise<void>;
-  onerror?: () => void;
-}
-
-export interface ObserveSseHandle {
-  close: () => void;
-}
-
+export interface ObserveSseHandlers { onopen?: () => void; onmessage?: (event: { data: string }) => void | Promise<void>; onerror?: () => void; }
+export interface ObserveSseHandle { close: () => void; }
 export type ObserveSseFactory = (url: string, handlers: ObserveSseHandlers) => ObserveSseHandle;
-
-export interface ObserveFetchCall {
-  url: string;
-  method: string;
-}
+export interface ObserveFetchCall { url: string; method: string; }
 
 export interface HyperagentObserveResult {
   loaded: boolean;
@@ -470,7 +736,11 @@ export interface HyperagentObserveResult {
   threadId: string | null;
   signedIn: boolean;
   rows: ObserveRow[];
+  ledger: ObserveLedgerWindow[];
   latest: ObserveSnapshot | null;
+  billing: BillingRateCard | null;
+  billingError: string | null;
+  billingReady: boolean;
   streamEvents: number;
   streamUp: boolean | null;
   fetches: ObserveFetchCall[];
@@ -479,22 +749,11 @@ export interface HyperagentObserveResult {
 }
 
 export function observeJsonResponse(status: number, body: unknown, statusText = 'OK'): ObserveFetchResponse {
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    statusText,
-    json: async () => body,
-  };
-}
-
-function asGetMethod(init?: ObserveFetchInit): string {
-  return (init?.method || 'GET').toUpperCase();
+  return { ok: status >= 200 && status < 300, status, statusText, json: async () => body };
 }
 
 async function readJson(response: ObserveFetchResponse, label: string): Promise<unknown> {
-  if (!response.ok) {
-    throw new Error(`${label} failed: ${response.status} ${response.statusText}`);
-  }
+  if (!response.ok) throw new Error(`${label} failed: ${response.status} ${response.statusText}`);
   return response.json();
 }
 
@@ -505,6 +764,7 @@ export async function runHyperagentObservePass(options: {
   openEventSource?: ObserveSseFactory;
   now?: () => number;
   fetchTimeoutMs?: number;
+  billingTimeoutMs?: number;
 }): Promise<HyperagentObserveResult> {
   const origin = options.origin.replace(/\/$/, '');
   const pathname = options.pathname || '/';
@@ -517,19 +777,21 @@ export async function runHyperagentObservePass(options: {
     threadId: null,
     signedIn: false,
     rows: [],
+    ledger: [],
     latest: null,
+    billing: null,
+    billingError: null,
+    billingReady: false,
     streamEvents: 0,
     streamUp: null,
     fetches,
     mutatingCalls: [],
     error: null,
   };
-
   if (!isHyperagentObserveOrigin(`${origin}/`)) {
     result.error = `hyperagent-observe is only allowed on hyperagent.com or www.hyperagent.com (origin: ${origin})`;
     return result;
   }
-
   const threadId = threadIdFromPath(pathname);
   result.threadId = threadId;
   if (!threadId) {
@@ -539,45 +801,34 @@ export async function runHyperagentObservePass(options: {
 
   const state = emptyObserveState(threadId);
   const fetchTimeoutMs = options.fetchTimeoutMs ?? OBSERVE_FETCH_TIMEOUT_MS;
-
-  const withTimeout = async <T>(promise: Promise<T>, label: string): Promise<T> => {
+  const billingTimeoutMs = options.billingTimeoutMs ?? OBSERVE_BILLING_TIMEOUT_MS;
+  const withTimeout = async <T>(promise: Promise<T>, label: string, timeoutMs = fetchTimeoutMs): Promise<T> => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
         promise,
         new Promise<T>((_resolve, reject) => {
-          timer = setTimeout(() => reject(new Error(`${label} timed out after ${fetchTimeoutMs}ms`)), fetchTimeoutMs);
+          timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
         }),
       ]);
     } finally {
-      if (timer) {
-        clearTimeout(timer);
-      }
+      if (timer) clearTimeout(timer);
     }
   };
-
-  const get = async (path: string): Promise<unknown> => {
+  const get = async (path: string, timeoutMs = fetchTimeoutMs): Promise<unknown> => {
     const url = `${origin}${path}`;
-    const method = 'GET';
-    fetches.push({ url, method });
-    const response = await withTimeout(
-      options.fetchImpl(url, {
-        method,
-        headers: { accept: 'application/json' },
-      }),
-      `GET ${path}`,
-    );
-    const used = asGetMethod({ method });
-    if (used !== 'GET' && used !== 'HEAD') {
-      result.mutatingCalls.push({ url, method: used });
-      throw new Error(`hyperagent-observe is GET-only; refused ${used} ${path}`);
-    }
-    return withTimeout(readJson(response, path), `GET ${path} body`);
+    fetches.push({ url, method: 'GET' });
+    const response = await withTimeout(options.fetchImpl(url, { method: 'GET', headers: { accept: 'application/json' } }), `GET ${path}`, timeoutMs);
+    return withTimeout(readJson(response, path), `GET ${path} body`, timeoutMs);
   };
-
-  const asErrorMessage = (error: unknown): string =>
-    String(error instanceof Error ? error.message : error);
-
+  const getOptional = async (path: string, timeoutMs: number): Promise<{ value: unknown | null; error: string | null }> => {
+    try {
+      return { value: await get(path, timeoutMs), error: null };
+    } catch (error) {
+      return { value: null, error: String(error instanceof Error ? error.message : error) };
+    }
+  };
+  const asError = (error: unknown) => String(error instanceof Error ? error.message : error);
   const cycle = async () => {
     const [status, thread, usage, breakdown] = (await Promise.all([
       get(`/api/threads/${threadId}/status`),
@@ -587,15 +838,19 @@ export async function runHyperagentObservePass(options: {
     ])) as [ThreadStatusPayload, ThreadPayload, UsagePayload, UsageBreakdownPayload];
     result.signedIn = true;
     result.error = null;
-    const snap = snapshotFromApis(status, thread, usage, breakdown, now());
-    applyObserveSnapshot(state, snap);
+    applyObserveSnapshot(state, snapshotFromApis(status, thread, usage, breakdown, now()));
   };
 
   try {
     await cycle();
+    const billing = await getOptional('/api/settings/billing/usage', billingTimeoutMs);
+    result.billingReady = true;
+    if (billing.value) result.billing = normalizeBillingUsage(billing.value, now());
+    else result.billingError = billing.error;
   } catch (error) {
-    result.error = asErrorMessage(error);
+    result.error = asError(error);
     result.rows = [...state.turns].reverse();
+    result.ledger = [...state.ledger];
     result.latest = state.latest;
     result.streamEvents = state.streamEvents;
     result.streamUp = state.streamUp;
@@ -607,26 +862,13 @@ export async function runHyperagentObservePass(options: {
     let refreshTail = Promise.resolve();
     const enqueueRefresh = () => {
       refreshTail = refreshTail.then(async () => {
-        try {
-          await cycle();
-        } catch (error) {
-          result.error = asErrorMessage(error);
-        }
+        try { await cycle(); } catch (error) { result.error = asError(error); }
       });
     };
-    const streamUrl = `${origin}/api/events/stream?threadId=${threadId}`;
-    const handle = options.openEventSource(streamUrl, {
-      onopen: () => {
-        state.streamUp = true;
-      },
-      onerror: () => {
-        state.streamUp = false;
-      },
-      onmessage: event => {
-        if (handleSseData(state, event.data) === 'refresh') {
-          enqueueRefresh();
-        }
-      },
+    const handle = options.openEventSource(`${origin}/api/events/stream?threadId=${threadId}`, {
+      onopen: () => { state.streamUp = true; },
+      onerror: () => { state.streamUp = false; },
+      onmessage: event => { if (handleSseData(state, event.data) === 'refresh') enqueueRefresh(); },
     });
     let previousTail: Promise<void> | null = null;
     let spins = 0;
@@ -640,6 +882,7 @@ export async function runHyperagentObservePass(options: {
   }
 
   result.rows = [...state.turns].reverse();
+  result.ledger = [...state.ledger];
   result.latest = state.latest;
   result.streamEvents = state.streamEvents;
   result.streamUp = state.streamUp;
