@@ -96,8 +96,8 @@ describe('hyperagent observe v6 accounting ledger', () => {
       attribution: 'main',
       confidence: 'high',
       tokenDelta: 200,
-      accountingCostDeltaUsd: 0.02,
     });
+    expect(state.ledger[0].accountingCostDeltaUsd).toBeCloseTo(0.02);
 
     expect(handleSseData(state, JSON.stringify({ type: 'cost-updated', costDeltaUsd: 0.04 }))).toBe('refresh');
     applyObserveSnapshot(
@@ -188,8 +188,8 @@ describe('hyperagent observe v6 accounting ledger', () => {
       eventCount: 2,
       attribution: 'main',
       confidence: 'medium',
-      sseCostUsd: 0.03,
     });
+    expect(state.ledger[0].sseCostUsd).toBeCloseTo(0.03);
   });
 
   it('derives exact Orb token rates when quantity and total are available and keeps pass-through lines distinct', () => {
