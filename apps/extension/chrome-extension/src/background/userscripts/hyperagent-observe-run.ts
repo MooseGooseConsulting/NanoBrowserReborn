@@ -9,7 +9,10 @@ export interface HyperagentObservePageResult {
   threadId: string | null;
   signedIn: boolean;
   rows: unknown[];
+  ledger?: unknown[];
   latest: { running?: boolean; phase?: { k?: string } } | null;
+  billing?: unknown | null;
+  billingError?: string | null;
   streamEvents: number;
   streamUp: boolean | null;
   fetches: unknown[];
@@ -35,26 +38,19 @@ export function waitForHyperagentObserveHandoffInPage(timeoutMs: number): Promis
     const inspect = () => {
       const result = (globalThis as { __nanoHyperagentObserve?: HyperagentObservePageResult }).__nanoHyperagentObserve;
       if (!result) {
-        if (Date.now() >= deadline) {
-          resolve(null);
-          return;
-        }
+        if (Date.now() >= deadline) { resolve(null); return; }
         setTimeout(inspect, pollMs);
         return;
       }
 
-      // Reinjection and SPA navigation can briefly leave a prior observer's
-      // global behind. Only accept the state published for this exact page.
       if (result.origin !== expectedOrigin || result.threadId !== expectedThreadId) {
-        if (Date.now() >= deadline) {
-          resolve(null);
-          return;
-        }
+        if (Date.now() >= deadline) { resolve(null); return; }
         setTimeout(inspect, pollMs);
         return;
       }
 
       const rows = Array.isArray(result.rows) ? result.rows : [];
+      const ledger = Array.isArray(result.ledger) ? result.ledger : [];
       const running = Boolean(result.latest?.running);
       if (result.error || rows.length > 0 || (result.latest && !running) || Date.now() >= deadline) {
         resolve({
@@ -64,7 +60,10 @@ export function waitForHyperagentObserveHandoffInPage(timeoutMs: number): Promis
           threadId: typeof result.threadId === 'string' ? result.threadId : null,
           signedIn: result.signedIn === true,
           rows: rows.slice(0, 300),
+          ledger: ledger.slice(-2500),
           latest: result.latest || null,
+          billing: result.billing || null,
+          billingError: typeof result.billingError === 'string' ? result.billingError : null,
           streamEvents: typeof result.streamEvents === 'number' ? result.streamEvents : 0,
           streamUp: typeof result.streamUp === 'boolean' ? result.streamUp : null,
           fetches: Array.isArray(result.fetches) ? result.fetches.slice(0, 40) : [],
@@ -106,7 +105,10 @@ export function formatHyperagentObserveHandoff(result: HyperagentObservePageResu
     thread_id: result.threadId,
     signed_in: result.signedIn,
     rows: result.rows,
+    ledger: result.ledger || [],
     latest: result.latest,
+    billing: result.billing || null,
+    billing_error: result.billingError || null,
     stream_events: result.streamEvents,
     stream_up: result.streamUp,
     timed_out: result.timedOut === true,
