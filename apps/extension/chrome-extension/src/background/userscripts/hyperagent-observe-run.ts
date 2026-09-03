@@ -13,6 +13,8 @@ export interface HyperagentObservePageResult {
   latest: { running?: boolean; phase?: { k?: string } } | null;
   billing?: unknown | null;
   billingError?: string | null;
+  billingReady?: boolean;
+  billingPending?: boolean;
   streamEvents: number;
   streamUp: boolean | null;
   fetches: unknown[];
@@ -26,7 +28,8 @@ type InjectionResult = { result?: HyperagentObservePageResult };
 /**
  * Runs in the page MAIN world. The observer itself is intentionally long-lived;
  * this function hands the action an initial idle/error snapshot or the first
- * completed row for an active run, rather than claiming injection is telemetry.
+ * completed row for an active run. v6.2 also waits for the bounded initial
+ * billing probe so an idle handoff does not race the advertised rate card.
  */
 export function waitForHyperagentObserveHandoffInPage(timeoutMs: number): Promise<HyperagentObservePageResult | null> {
   const deadline = Date.now() + timeoutMs;
@@ -52,7 +55,11 @@ export function waitForHyperagentObserveHandoffInPage(timeoutMs: number): Promis
       const rows = Array.isArray(result.rows) ? result.rows : [];
       const ledger = Array.isArray(result.ledger) ? result.ledger : [];
       const running = Boolean(result.latest?.running);
-      if (result.error || rows.length > 0 || (result.latest && !running) || Date.now() >= deadline) {
+      const observationReady = rows.length > 0 || Boolean(result.latest && !running);
+      // Undefined keeps compatibility with an older already-loaded observer.
+      const billingSettled = result.billingReady !== false && result.billingPending !== true;
+      const deadlineReached = Date.now() >= deadline;
+      if (result.error || (observationReady && billingSettled) || deadlineReached) {
         resolve({
           loaded: result.loaded === true,
           scriptId: 'hyperagent-observe',
@@ -64,12 +71,14 @@ export function waitForHyperagentObserveHandoffInPage(timeoutMs: number): Promis
           latest: result.latest || null,
           billing: result.billing || null,
           billingError: typeof result.billingError === 'string' ? result.billingError : null,
+          billingReady: result.billingReady === true,
+          billingPending: result.billingPending === true,
           streamEvents: typeof result.streamEvents === 'number' ? result.streamEvents : 0,
           streamUp: typeof result.streamUp === 'boolean' ? result.streamUp : null,
           fetches: Array.isArray(result.fetches) ? result.fetches.slice(0, 40) : [],
           mutatingCalls: Array.isArray(result.mutatingCalls) ? result.mutatingCalls : [],
           error: typeof result.error === 'string' ? result.error : null,
-          timedOut: running && !rows.length && Date.now() >= deadline,
+          timedOut: running && !rows.length && deadlineReached,
         });
         return;
       }
@@ -109,6 +118,8 @@ export function formatHyperagentObserveHandoff(result: HyperagentObservePageResu
     latest: result.latest,
     billing: result.billing || null,
     billing_error: result.billingError || null,
+    billing_ready: result.billingReady === true,
+    billing_pending: result.billingPending === true,
     stream_events: result.streamEvents,
     stream_up: result.streamUp,
     timed_out: result.timedOut === true,
